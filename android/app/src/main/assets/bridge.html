@@ -1,8 +1,70 @@
 <!doctype html><html><head><meta charset="utf-8"><script src="peerjs.min.js"></script></head><body><script>
 const N = window.TsunaguNative;
+// ---------------------------------------------------------------------------
+// Two transports carry the same JSON message protocol:
+//  - "cloud": PeerJS (public signaling) -> WebRTC data channel, as before.
+//  - "lan":   the PC fetches this phone's LAN signaling endpoint (LanServer)
+//             and offers a raw RTCPeerConnection; this side only answers.
+// LAN is preferred when both are up: the native side picks the active
+// transport (B.setActive) based on which one received the PC's "welcome".
+// Raw-channel framing: messages are JSON text (the whole protocol is already
+// JSON-safe: file chunks and photo thumbs travel as base64 strings), framed
+// as [0x00]+utf8 for small payloads or chunked frames
+// [0x01][id:u32][idx:u16][total:u16]+slice(<=16000 bytes) for large ones.
+// The identical codec lives in src/link.ts (LanTransport).
+// ---------------------------------------------------------------------------
+const ENC = new TextEncoder(), DEC = new TextDecoder();
+let frameSeq = 1;
+function encodeFrames(text) {
+  const bytes = ENC.encode(text), CH = 16000;
+  if (bytes.length <= CH) { const f = new Uint8Array(bytes.length + 1); f[0] = 0; f.set(bytes, 1); return [f.buffer]; }
+  const id = (frameSeq = (frameSeq + 1) >>> 0) || (frameSeq = 1);
+  const total = Math.ceil(bytes.length / CH), out = [];
+  for (let i = 0; i < total; i++) {
+    const slice = bytes.subarray(i * CH, (i + 1) * CH);
+    const f = new Uint8Array(9 + slice.length), dv = new DataView(f.buffer);
+    f[0] = 1; dv.setUint32(1, id); dv.setUint16(5, i); dv.setUint16(7, total); f.set(slice, 9);
+    out.push(f.buffer);
+  }
+  return out;
+}
+function makeDecoder(onText) {
+  const pending = new Map();
+  return (buf) => {
+    const u = new Uint8Array(buf);
+    if (!u.length) return;
+    if (u[0] === 0) { onText(DEC.decode(u.subarray(1))); return; }
+    if (u[0] !== 1 || u.length < 9) return;
+    const dv = new DataView(u.buffer, u.byteOffset, u.byteLength);
+    const id = dv.getUint32(1), idx = dv.getUint16(5), total = dv.getUint16(7);
+    let p = pending.get(id);
+    if (!p) { p = { parts: new Array(total), got: 0 }; pending.set(id, p); }
+    if (p.parts[idx] === undefined) { p.parts[idx] = u.slice(9); p.got++; }
+    if (p.got === total) {
+      pending.delete(id);
+      let len = 0; for (const x of p.parts) len += x.length;
+      const all = new Uint8Array(len); let o = 0;
+      for (const x of p.parts) { all.set(x, o); o += x.length; }
+      onText(DEC.decode(all));
+    }
+  };
+}
+function waitIce(pc, ms) {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((res) => {
+    const to = setTimeout(done, ms);
+    function done() { pc.removeEventListener('icegatheringstatechange', f); clearTimeout(to); res(); }
+    function f() { if (pc.iceGatheringState === 'complete') done(); }
+    pc.addEventListener('icegatheringstatechange', f);
+  });
+}
+
+// ---------------- cloud (PeerJS) ----------------
 let peer = null, conn = null, target = '', hello = {}, retry = 1500, timer = null;
+let welcomedCloud = false;
 function st(s) { N.onStatus(s); }
 function schedule(full) {
+  if (cloudHold) return;
   clearTimeout(timer);
   timer = setTimeout(() => { if (full || !peer || peer.destroyed || !peer.open) init(); else connect(); }, retry);
   retry = Math.min(retry * 1.6, 30000);
@@ -16,23 +78,106 @@ function init() {
   peer.on('error', (e) => { st('error:' + e.type); schedule(e.type !== 'peer-unavailable'); });
 }
 function connect() {
-  if (conn) { try { conn.close(); } catch (e) {} }
+  if (cloudHold) return;
+  if (conn) { try { conn.close(); } catch (e) {} conn = null; }
+  welcomedCloud = false;
   st('connecting');
   // 'binary' (BinaryPack) is required: PeerJS 'json' serialization silently drops
   // any message >= 16300 bytes, which broke file chunks, photo lists and long SMS threads.
   const c = peer.connect(target, { reliable: true, serialization: 'binary' });
   conn = c;
   c.on('open', () => { retry = 1500; c.send(Object.assign({ t: 'hello' }, hello)); });
-  c.on('data', (d) => { try { N.onMessage(JSON.stringify(d)); } catch (e) {} });
-  c.on('close', () => { if (conn === c) { conn = null; st('disconnected'); schedule(false); } });
+  c.on('data', (d) => { if (d && d.t === 'welcome') welcomedCloud = true; try { N.onMessage(JSON.stringify(d), 'cloud'); } catch (e) {} });
+  c.on('close', () => { if (conn === c) { conn = null; welcomedCloud = false; st('disconnected'); schedule(false); } });
   c.on('error', () => {});
 }
+
+// ---------------- lan (raw RTCPeerConnection, answerer) ----------------
+let active = 'cloud';       // transport B.send prefers; native decides via setActive
+let cloudHold = false;      // true while LAN is the active transport
+let lanPc = null, lanDc = null, welcomedLan = false;
+const lanDecoder = makeDecoder((s) => {
+  let o = null; try { o = JSON.parse(s); } catch (e) { return; }
+  if (o && o.t === 'welcome') welcomedLan = true;
+  try { N.onMessage(s, 'lan'); } catch (e) {}
+});
+function lanSendObj(o) {
+  if (lanDc && lanDc.readyState === 'open') {
+    for (const f of encodeFrames(JSON.stringify(o))) lanDc.send(f);
+    return lanDc.bufferedAmount;
+  }
+  return -1;
+}
+function closeLan(notify) {
+  try { lanDc && lanDc.close(); } catch (e) {}
+  try { lanPc && lanPc.close(); } catch (e) {}
+  lanDc = null; lanPc = null; welcomedLan = false;
+  if (notify) N.onLanStatus('closed');
+}
+window.Lan = {
+  // Called by the native LAN server (authenticated) with the PC's SDP offer.
+  // The answer SDP is handed back via N.onLanAnswer('') on failure.
+  offer(sdp) {
+    closeLan(false);
+    const pc = new RTCPeerConnection({ iceServers: [] });
+    lanPc = pc;
+    pc.ondatachannel = (e) => {
+      const dc = e.channel; lanDc = dc; dc.binaryType = 'arraybuffer';
+      dc.onopen = () => { N.onLanStatus('open'); lanSendObj(Object.assign({ t: 'hello' }, hello)); };
+      dc.onmessage = (ev) => { if (ev.data instanceof ArrayBuffer) lanDecoder(ev.data); };
+      dc.onclose = () => { if (lanPc === pc) closeLan(true); };
+    };
+    pc.oniceconnectionstatechange = () => {
+      if (lanPc === pc && (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed')) closeLan(true);
+    };
+    (async () => {
+      try {
+        await pc.setRemoteDescription({ type: 'offer', sdp });
+        const ans = await pc.createAnswer();
+        await pc.setLocalDescription(ans);
+        await waitIce(pc, 1800);
+        if (lanPc === pc && pc.localDescription) N.onLanAnswer(pc.localDescription.sdp);
+        else N.onLanAnswer('');
+      } catch (e) { N.onLanAnswer(''); }
+    })();
+  }
+};
+
 window.B = {
-  start(code, helloJson) { target = 'tsunagu-link-' + code.toLowerCase(); hello = JSON.parse(helloJson); retry = 1500; init(); },
-  kick() { if (!conn || !conn.open) { retry = 500; schedule(!peer || !peer.open); } },
-  stop() { clearTimeout(timer); try { conn && conn.close(); peer && peer.destroy(); } catch (e) {} conn = null; peer = null; st('idle'); },
-  send(json) { if (conn && conn.open) { conn.send(JSON.parse(json)); return conn.dataChannel ? conn.dataChannel.bufferedAmount : 0; } return -1; },
-  buffered() { return conn && conn.open && conn.dataChannel ? conn.dataChannel.bufferedAmount : -1; }
+  start(code, helloJson) { target = 'tsunagu-link-' + code.toLowerCase(); hello = JSON.parse(helloJson); retry = 1500; active = 'cloud'; cloudHold = false; closeLan(false); init(); },
+  setActive(via) {
+    active = via;
+    if (via === 'lan') {
+      cloudHold = true;
+      clearTimeout(timer);
+      if (conn) { try { conn.close(); } catch (e) {} conn = null; welcomedCloud = false; }
+    } else {
+      cloudHold = false;
+      // LAN fully established but cloud won the race (should not normally
+      // happen): drop LAN. A still-handshaking LAN is left alone; if it gets
+      // welcomed later, native switches active back to LAN.
+      if (lanDc && lanDc.readyState === 'open' && welcomedLan) closeLan(true);
+      if (!conn || !conn.open || !welcomedCloud) { retry = 500; schedule(false); }
+    }
+  },
+  kick() {
+    if (active === 'lan') return; // LAN is dialed by the PC; nothing to redial here
+    if (!conn || !conn.open || !welcomedCloud) { retry = 500; schedule(!peer || !peer.open); }
+  },
+  stop() { clearTimeout(timer); closeLan(false); try { conn && conn.close(); peer && peer.destroy(); } catch (e) {} conn = null; peer = null; active = 'cloud'; cloudHold = false; st('idle'); },
+  send(json) {
+    const first = active === 'lan' ? 'lan' : 'cloud';
+    const order = first === 'lan' ? ['lan', 'cloud'] : ['cloud', 'lan'];
+    for (const via of order) {
+      if (via === 'lan') { const r = lanSendObj(JSON.parse(json)); if (r >= 0) return r; }
+      else if (conn && conn.open) { conn.send(JSON.parse(json)); return conn.dataChannel ? conn.dataChannel.bufferedAmount : 0; }
+    }
+    return -1;
+  },
+  buffered() {
+    if (active === 'lan') return lanDc && lanDc.readyState === 'open' ? lanDc.bufferedAmount : -1;
+    return conn && conn.open && conn.dataChannel ? conn.dataChannel.bufferedAmount : -1;
+  }
 };
 N.onReady();
 </script></body></html>

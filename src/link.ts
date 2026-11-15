@@ -1,8 +1,10 @@
 import Peer, { DataConnection } from 'peerjs'
 
 export type Status = 'starting' | 'waiting' | 'connected' | 'error'
+export type Via = 'lan' | 'cloud'
 export interface Device { name: string; model: string; android: string }
-export interface Info { battery: number; charging: boolean; net: string; carrier?: string; storageFree: number; storageTotal: number; ringer?: string }
+export interface Info { battery: number; charging: boolean; net: string; carrier?: string; storageFree: number; storageTotal: number; ringer?: string; lan?: LanEps }
+export interface LanEps { ips: string[]; port: number }
 export interface Notif { key: string; app: string; pkg: string; title: string; text: string; time: number; icon?: string; reply?: boolean; actions?: string[] }
 export interface Media { app: string; title: string; artist: string; playing: boolean; art?: string; position?: number; duration?: number }
 export interface Thread { id: string; address: string; name?: string; snippet: string; time: number; unread?: boolean; kind?: 'sms' | 'rcs' | 'mms' }
@@ -15,7 +17,7 @@ export interface Toast { id: number; text: string; action?: { label: string; run
 
 export interface State {
   status: Status; code: string; secret: string; error?: string
-  device?: Device; info?: Info; seed?: string
+  device?: Device; info?: Info; seed?: string; via?: Via
   notifs: Notif[]; media?: Media | null
   threads: Thread[]; sms: Record<string, Sms[]>
   calls: Call[]; photos: Photo[]; photosMore: boolean
@@ -30,9 +32,10 @@ const rand = (n: number, a = ALPHA) => Array.from(crypto.getRandomValues(new Uin
 const ls = {
   get: (k: string) => localStorage.getItem('ts.' + k),
   set: (k: string, v: string) => localStorage.setItem('ts.' + k, v),
+  del: (k: string) => localStorage.removeItem('ts.' + k),
 }
 const CHUNK = 48 * 1024
-export const APP_VERSION = '1.0.3'
+export const APP_VERSION = '1.0.4'
 
 function b64(buf: ArrayBuffer) {
   const u = new Uint8Array(buf); let s = ''
@@ -41,11 +44,114 @@ function b64(buf: ArrayBuffer) {
 }
 function unb64(s: string) { const bin = atob(s); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u }
 
+// ---------------------------------------------------------------------------
+// Transports. The app protocol is identical JSON messages over either:
+//  - "cloud": PeerJS (public signaling) WebRTC data channel.
+//  - "lan":   a raw RTCPeerConnection offered by this page to the phone's
+//             authenticated LAN signaling endpoint (same Wi-Fi). Messages are
+//             JSON text framed as [0x00]+utf8, or chunked frames
+//             [0x01][id:u32][idx:u16][total:u16]+slice(<=16000B) when large —
+//             the identical codec lives in the phone's bridge.html.
+// ---------------------------------------------------------------------------
+interface Transport {
+  kind: Via
+  readonly open: boolean
+  send(m: any): void
+  close(): void
+  buffered(): number
+}
+
+class PeerTransport implements Transport {
+  kind: Via = 'cloud'
+  constructor(private c: DataConnection) {}
+  get open() { return this.c.open }
+  send(m: any) { this.c.send(m) }
+  close() { try { this.c.close() } catch {} }
+  buffered() { return ((this.c as any).dataChannel as RTCDataChannel | undefined)?.bufferedAmount ?? 0 }
+}
+
+const FRAME_CHUNK = 16000
+let frameSeq = 1
+function encodeFrames(text: string): ArrayBuffer[] {
+  const bytes = new TextEncoder().encode(text)
+  if (bytes.length <= FRAME_CHUNK) { const f = new Uint8Array(bytes.length + 1); f[0] = 0; f.set(bytes, 1); return [f.buffer] }
+  const id = (frameSeq = (frameSeq + 1) >>> 0) || (frameSeq = 1)
+  const total = Math.ceil(bytes.length / FRAME_CHUNK); const out: ArrayBuffer[] = []
+  for (let i = 0; i < total; i++) {
+    const slice = bytes.subarray(i * FRAME_CHUNK, (i + 1) * FRAME_CHUNK)
+    const f = new Uint8Array(9 + slice.length); const dv = new DataView(f.buffer)
+    f[0] = 1; dv.setUint32(1, id); dv.setUint16(5, i); dv.setUint16(7, total); f.set(slice, 9)
+    out.push(f.buffer)
+  }
+  return out
+}
+function makeFrameDecoder(onText: (s: string) => void) {
+  const pending = new Map<number, { parts: (Uint8Array | undefined)[]; got: number }>()
+  const dec = new TextDecoder()
+  return (buf: ArrayBuffer) => {
+    const u = new Uint8Array(buf); if (!u.length) return
+    if (u[0] === 0) { onText(dec.decode(u.subarray(1))); return }
+    if (u[0] !== 1 || u.length < 9) return
+    const dv = new DataView(u.buffer, u.byteOffset, u.byteLength)
+    const id = dv.getUint32(1), idx = dv.getUint16(5), total = dv.getUint16(7)
+    let p = pending.get(id); if (!p) { p = { parts: new Array(total), got: 0 }; pending.set(id, p) }
+    if (p.parts[idx] === undefined) { p.parts[idx] = u.slice(9); p.got++ }
+    if (p.got === total) {
+      pending.delete(id)
+      let len = 0; for (const x of p.parts) len += x!.length
+      const all = new Uint8Array(len); let o = 0
+      for (const x of p.parts) { all.set(x!, o); o += x!.length }
+      onText(dec.decode(all))
+    }
+  }
+}
+function waitIce(pc: RTCPeerConnection, ms: number) {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve()
+  return new Promise<void>((res) => {
+    const to = setTimeout(done, ms)
+    function done() { pc.removeEventListener('icegatheringstatechange', f); clearTimeout(to); res() }
+    function f() { if (pc.iceGatheringState === 'complete') done() }
+    pc.addEventListener('icegatheringstatechange', f)
+  })
+}
+function firstOk<T>(promises: Promise<T>[]): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let left = promises.length
+    if (!left) return reject(new Error('none'))
+    for (const p of promises) p.then(resolve, () => { if (--left === 0) reject(new Error('all failed')) })
+  })
+}
+async function sha256Hex(s: string) {
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
+  return [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('')
+}
+
+class LanTransport implements Transport {
+  kind: Via = 'lan'
+  onmsg: (m: any) => void = () => {}
+  onclose: () => void = () => {}
+  private closed = false
+  private dec = makeFrameDecoder((s) => { try { this.onmsg(JSON.parse(s)) } catch {} })
+  constructor(private pc: RTCPeerConnection, private dc: RTCDataChannel) {
+    dc.binaryType = 'arraybuffer'
+    dc.onmessage = (e) => { if (e.data instanceof ArrayBuffer) this.dec(e.data) }
+    dc.onclose = () => this.fireClose()
+    pc.oniceconnectionstatechange = () => { if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') this.fireClose() }
+  }
+  private fireClose() { if (!this.closed) { this.closed = true; this.onclose() } }
+  get open() { return this.dc.readyState === 'open' }
+  send(m: any) { for (const f of encodeFrames(JSON.stringify(m))) this.dc.send(f) }
+  close() { try { this.dc.close() } catch {} try { this.pc.close() } catch {} this.fireClose() }
+  buffered() { return this.dc.bufferedAmount }
+}
+
 class Link {
   state: State
   private subs = new Set<() => void>()
   private peer?: Peer
-  private conn?: DataConnection
+  private conn?: Transport
+  private pendingLan?: LanTransport
+  private lanTrying = false
   private incoming = new Map<string, { parts: Uint8Array[]; t: Transfer }>()
   private toastId = 0
   private lastClip = ''
@@ -57,6 +163,11 @@ class Link {
     const focusNotif = new URLSearchParams(location.search).get('notif') || undefined
     this.state = { status: 'starting', code, secret, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif }
     this.start()
+    // If we already know the phone's LAN endpoints (learned during a previous
+    // pairing), try the direct route right away; keep retrying while offline
+    // and upgrade a cloud connection to LAN when the network allows it.
+    this.tryLan()
+    setInterval(() => this.tryLan(), 20000)
     // Replies / action taps typed into desktop notifications come back from the
     // service worker; relay them to the phone over the paired connection only.
     navigator.serviceWorker?.addEventListener('message', (e) => {
@@ -78,7 +189,7 @@ class Link {
     const peer = new Peer('tsunagu-link-' + this.state.code.toLowerCase(), { debug: 0 })
     this.peer = peer
     peer.on('open', () => this.set({ status: this.conn?.open ? 'connected' : 'waiting', error: undefined }))
-    peer.on('connection', (c) => this.onConn(c))
+    peer.on('connection', (c) => this.onConn(new PeerTransport(c), c))
     peer.on('disconnected', () => { if (!peer.destroyed) setTimeout(() => peer.reconnect(), 2000) })
     peer.on('error', (e: any) => {
       if (e.type === 'unavailable-id') this.set({ status: 'error', error: 'このコードは別のタブで使用中です。ほかのタブを閉じてください。' })
@@ -87,27 +198,41 @@ class Link {
   }
 
   regenerate() {
-    const code = rand(6), secret = rand(20); ls.set('code', code); ls.set('secret', secret); ls.set('trusted', '[]')
-    this.conn?.close(); this.set({ code, secret, status: 'starting', device: undefined }); this.start()
+    const code = rand(6), secret = rand(20); ls.set('code', code); ls.set('secret', secret); ls.set('trusted', '[]'); ls.del('lan')
+    this.conn?.close(); this.pendingLan?.close(); this.set({ code, secret, status: 'starting', device: undefined, via: undefined }); this.start()
   }
 
   get qrText() { return `tsunagu:${this.state.code}:${this.state.secret}` }
 
-  private onConn(c: DataConnection) {
-    c.on('data', (d: any) => this.onData(c, d))
-    c.on('close', () => { if (this.conn === c) { this.conn = undefined; this.set({ status: 'waiting', media: undefined, incomingCall: null }); this.toast('スマートフォンとの接続が切れました') } })
-    c.on('error', () => {})
+  private onConn(t: Transport, raw?: DataConnection) {
+    if (raw) {
+      raw.on('data', (d: any) => this.onData(t, d))
+      raw.on('close', () => this.onTransportClose(t))
+      raw.on('error', () => {})
+    }
   }
 
-  private accept(c: DataConnection, hello: any) {
+  private onTransportClose(t: Transport) {
+    if (this.pendingLan === t) { this.pendingLan = undefined; return }
+    if (this.conn === t) {
+      this.conn = undefined
+      this.set({ status: 'waiting', via: undefined, media: undefined, incomingCall: null })
+      this.toast('スマートフォンとの接続が切れました')
+      setTimeout(() => this.tryLan(), 3000)
+    }
+  }
+
+  private accept(c: Transport, hello: any) {
     if (this.conn && this.conn !== c) this.conn.close()
+    if (this.pendingLan === c) this.pendingLan = undefined
     this.conn = c
     let token = hello.token
     const trusted: string[] = JSON.parse(ls.get('trusted') || '[]')
     if (!trusted.includes(token)) { token = rand(24); trusted.push(token); ls.set('trusted', JSON.stringify(trusted.slice(-10))) }
     c.send({ t: 'welcome', token, pc: navigator.userAgent.includes('Windows') ? 'Windows PC' : 'PC' })
     if (hello.seed) ls.set('seed', hello.seed)
-    this.set({ status: 'connected', device: { name: hello.name, model: hello.model, android: hello.android }, seed: hello.seed || this.state.seed, pending: undefined })
+    this.learnLan(hello.lan)
+    this.set({ status: 'connected', via: c.kind, device: { name: hello.name, model: hello.model, android: hello.android }, seed: hello.seed || this.state.seed, pending: undefined })
     for (const what of ['info', 'notifs', 'media', 'threads', 'calls']) this.send({ t: 'get', what })
     this.getPhotos(true)
     this.toast(`${hello.name} と接続しました`)
@@ -120,6 +245,69 @@ class Link {
     setTimeout(() => this.set({ toasts: this.state.toasts.filter((t) => t.id !== id) }), action ? 8000 : 3500)
   }
   clearFocusNotif() { if (this.state.focusNotif) this.set({ focusNotif: undefined }) }
+
+  /** Send an SMS from the PC, showing it in the open conversation right away.
+   *  The phone's follow-up history push replaces the optimistic entry. */
+  sendSms(to: string, body: string, threadId: string | null) {
+    this.send({ t: 'sms_send', to, body, threadId })
+    if (threadId && threadId !== 'new') {
+      const m: Sms = { id: 'tmp' + Date.now(), body, time: Date.now(), mine: true, kind: 'sms' }
+      this.set({ sms: { ...this.state.sms, [threadId]: [...(this.state.sms[threadId] || []), m] } })
+    }
+  }
+
+  // ---------------- LAN direct connection ----------------
+  private lanEps(): LanEps | null {
+    try { const v = JSON.parse(ls.get('lan') || 'null'); return v && Array.isArray(v.ips) && v.ips.length && v.port > 0 ? v : null } catch { return null }
+  }
+  private learnLan(lan: any) {
+    if (!lan || !Array.isArray(lan.ips) || !lan.ips.length || !(lan.port > 0)) return
+    const v = JSON.stringify({ ips: lan.ips.slice(0, 4), port: lan.port })
+    if (ls.get('lan') !== v) { ls.set('lan', v); this.tryLan() }
+  }
+  private async lanAuth(): Promise<string[]> {
+    const trusted: string[] = JSON.parse(ls.get('trusted') || '[]')
+    return Promise.all([this.state.secret, ...trusted].map(sha256Hex))
+  }
+  private async lanFetch(ip: string, port: number, path: string, body: any, timeoutMs: number): Promise<any> {
+    const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), timeoutMs)
+    try {
+      const r = await fetch(`http://${ip}:${port}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: ctl.signal })
+      if (!r.ok) throw new Error('http ' + r.status)
+      return await r.json()
+    } finally { clearTimeout(to) }
+  }
+  private async tryLan() {
+    if (this.lanTrying || (this.conn?.kind === 'lan' && this.conn.open) || this.pendingLan) return
+    if (this.state.transfers.some((t) => t.state === 'active')) return // never switch transports mid-transfer
+    const eps = this.lanEps(); if (!eps) return
+    this.lanTrying = true
+    try { await this.lanConnect(eps) } catch { /* unreachable / blocked: cloud fallback keeps working */ }
+    finally { this.lanTrying = false }
+  }
+  private async lanConnect(eps: LanEps) {
+    const auth = await this.lanAuth()
+    const ip = await firstOk(eps.ips.map(async (ip) => { await this.lanFetch(ip, eps.port, '/ping', { auth }, 1500); return ip }))
+    if (this.conn?.kind === 'lan' && this.conn.open) return
+    const pc = new RTCPeerConnection({ iceServers: [] })
+    const dc = pc.createDataChannel('tsunagu')
+    const t = new LanTransport(pc, dc)
+    this.pendingLan = t
+    t.onmsg = (m) => this.onData(t, m)
+    t.onclose = () => this.onTransportClose(t)
+    try {
+      const offer = await pc.createOffer()
+      await pc.setLocalDescription(offer)
+      await waitIce(pc, 2000)
+      const sdp = pc.localDescription?.sdp
+      if (!sdp) throw new Error('no local sdp')
+      const ans = await this.lanFetch(ip, eps.port, '/signal', { auth, sdp }, 12000)
+      if (this.pendingLan !== t) return // superseded / closed meanwhile
+      await pc.setRemoteDescription({ type: 'answer', sdp: ans.sdp })
+    } catch { t.close(); return }
+    // If the channel opens but no hello is accepted within 8s, give up on it.
+    setTimeout(() => { if (this.pendingLan === t) { this.pendingLan = undefined; t.close() } }, 8000)
+  }
 
   private notify(title: string, body: string, rich?: { key?: string; reply?: boolean; actions?: string[]; icon?: string }) {
     if (document.hasFocus() || !('Notification' in window) || Notification.permission !== 'granted') return
@@ -144,9 +332,12 @@ class Link {
     viaSw().catch(() => { try { new Notification(title, { body, icon }) } catch {} })
   }
 
-  private onData(c: DataConnection, m: any) {
+  private onData(c: Transport, m: any) {
     if (!m || typeof m !== 'object') return
     if (m.t === 'hello') {
+      // LAN is strictly preferred: once it is live, ignore cloud hellos so the
+      // connection never flaps back to the slower route.
+      if (this.conn?.kind === 'lan' && c.kind === 'cloud') return
       const trusted: string[] = JSON.parse(ls.get('trusted') || '[]')
       if (m.token === this.state.secret || trusted.includes(m.token)) this.accept(c, m)
       else this.set({ pending: { name: m.name || 'Android', accept: () => this.accept(c, m), reject: () => { c.close(); this.set({ pending: undefined }) } } })
@@ -155,7 +346,7 @@ class Link {
     if (c !== this.conn) return
     const s = this.state
     switch (m.t) {
-      case 'info': this.set({ info: m.info }); break
+      case 'info': this.set({ info: m.info }); this.learnLan(m.info?.lan); break
       case 'notifs': this.set({ notifs: m.items }); break
       case 'notif': {
         const n: Notif = m.item
@@ -175,7 +366,7 @@ class Link {
       case 'threads': this.set({ threads: m.items }); break
       case 'sms': this.set({ sms: { ...s.sms, [m.threadId]: m.items } }); break
       case 'sms_in': {
-        this.notify(m.name || m.address, m.body); this.toast(`SMS: ${m.name || m.address}`)
+        this.notify(m.name || m.address, m.body); this.toast(`メッセージ: ${m.name || m.address}`)
         this.send({ t: 'get', what: 'threads' }); if (m.threadId) this.send({ t: 'get', what: 'sms', threadId: m.threadId })
         break
       }
@@ -247,8 +438,7 @@ class Link {
       try {
         for (let off = 0; off < file.size; off += CHUNK) {
           const buf = await file.slice(off, off + CHUNK).arrayBuffer()
-          const dc = (this.conn as any)?.dataChannel as RTCDataChannel | undefined
-          while (dc && dc.bufferedAmount > 4 * 1024 * 1024) await new Promise((r) => setTimeout(r, 30))
+          while (this.conn && this.conn.buffered() > 4 * 1024 * 1024) await new Promise((r) => setTimeout(r, 30))
           if (!this.conn?.open) throw new Error('closed')
           this.send({ t: 'file_chunk', id, d: b64(buf) })
           if ((off / CHUNK) % 8 === 0) this.updT(id, { done: off + buf.byteLength })

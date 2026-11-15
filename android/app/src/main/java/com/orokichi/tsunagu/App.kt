@@ -38,6 +38,50 @@ object Prefs {
     fun paired(c: Context) = code(c) != null
 }
 
+/**
+ * Local log of messages sent from the PC through this app.
+ *
+ * Android only lets the *default* SMS app write to the SMS provider, and
+ * SmsManager sends without recording — so without this log, messages sent
+ * from the PC would never appear in any history. Features merges these
+ * entries into threads()/sms() (deduped against the provider when a copy
+ * exists there, e.g. when the provider insert in sendSms succeeded).
+ */
+object SentLog {
+    data class Entry(val address: String, val body: String, val time: Long)
+
+    private fun p(c: Context) = c.getSharedPreferences("tsunagu_sent", Context.MODE_PRIVATE)
+
+    fun add(c: Context, address: String, body: String) {
+        val arr = raw(c)
+        arr.put(org.json.JSONObject().put("a", address).put("b", body).put("t", System.currentTimeMillis()))
+        while (arr.length() > 300) arr.remove(0)
+        p(c).edit().putString("log", arr.toString()).apply()
+    }
+
+    fun all(c: Context): List<Entry> {
+        val arr = raw(c)
+        val out = ArrayList<Entry>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            out.add(Entry(o.optString("a"), o.optString("b"), o.optLong("t")))
+        }
+        return out
+    }
+
+    private fun raw(c: Context): org.json.JSONArray =
+        runCatching { org.json.JSONArray(p(c).getString("log", "[]")) }.getOrDefault(org.json.JSONArray())
+
+    /** Loose phone-number comparison: digits only, suffix match for local vs +81 forms. */
+    fun sameNumber(a: String, b: String): Boolean {
+        val da = a.filter { it.isDigit() }; val db = b.filter { it.isDigit() }
+        if (da.isEmpty() || db.isEmpty()) return a == b
+        if (da == db) return true
+        val (long, short) = if (da.length >= db.length) da to db else db to da
+        return short.length >= 10 && long.endsWith(short)
+    }
+}
+
 object Img {
     fun toB64(bmp: Bitmap, png: Boolean = false, q: Int = 78): String {
         val out = ByteArrayOutputStream()

@@ -8,7 +8,7 @@ PC と Android をシームレスにつなぐ連携システム。Windows の「
 ## 機能
 | 機能 | 内容 |
 |---|---|
-| ペアリング | PC の QR をアプリでスキャン、またはコード入力（PC 側で許可）。以後は自動再接続 |
+| ペアリング | PC の QR をアプリでスキャン、またはコード入力（PC 側で許可）。連携は初回のみで、以後は同じ Wi-Fi で直接接続（LAN）に自動接続し、外出先などではクラウド経由にフォールバック |
 | 通知 | ミラー表示・デスクトップ通知・返信・アクション・消去 |
 | メッセージ | SMS スレッド閲覧・送信・受信通知 |
 | 通話 | 通話履歴・ダイヤルパッドから発信・着信通知・拒否 |
@@ -18,7 +18,7 @@ PC と Android をシームレスにつなぐ連携システム。Windows の「
 | その他 | メディア操作、スマホを鳴らす（マナーモードでも）、リンクを開く、電池・回線・容量・着信モード |
 
 ## 構成
-- 通信: WebRTC DataChannel（PeerJS、端末間 P2P・暗号化。シグナリングのみ PeerJS クラウド）
+- 通信: WebRTC DataChannel（端末間 P2P・暗号化）。同一 LAN ではスマホ側の認証付きシグナリング受け口（PNA 対応 HTTP）で直接接続し、トラフィックはインターネットを経由しない。LAN が使えない環境では PeerJS クラウド経由にフォールバック（シグナリングのみクラウド）
 - `/` Web: Vite + React + TypeScript、@material/material-color-utilities
 - `/android` Android: Kotlin + Jetpack Compose（Material 3 Expressive: MaterialExpressiveTheme / MotionScheme.expressive / MaterialShapes / LoadingIndicator / WavyProgress）。接続はフォアグラウンドサービス内のヘッドレス WebView（PeerJS）で維持し、通知リスナー・SMS・通話・MediaStore・MediaSession などネイティブ API とブリッジ
 

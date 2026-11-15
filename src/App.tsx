@@ -61,8 +61,8 @@ function Pairing() {
         <p className="lead">通知・メッセージ・通話・写真・Quick Share・クリップボードを、このブラウザからそのまま扱えます。</p>
         <ol className="steps">
           <li><span>1</span><div><b>Android アプリを入れる</b><a className="btn tonal" href={APK_URL} target="_blank" rel="noreferrer"><Icon n="android" />APK をダウンロード</a></div></li>
-          <li><span>2</span><div><b>アプリで「PC とつなぐ」</b>右の QR をスキャン、またはコードを入力</div></li>
-          <li><span>3</span><div><b>以後は自動で接続</b>このページを開くだけでつながります</div></li>
+          <li><span>2</span><div><b>アプリで「PC とつなぐ」</b>右の QR をスキャン、またはコードを入力（コードの入力は初回だけです）</div></li>
+          <li><span>3</span><div><b>以後は自動で接続</b>同じ Wi-Fi につながっていれば、このページを開くだけで直接つながります。外出先などではクラウド経由でつながります</div></li>
         </ol>
       </section>
       <section className="pair-card">
@@ -91,6 +91,7 @@ function Home({ go }: { go: (v: string) => void }) {
           <div className="overline">接続中</div>
           <h2>{s.device?.name}</h2>
           <div className="muted">{s.device?.model} · Android {s.device?.android}</div>
+          <div className={'via-chip ' + (s.via || '')}><Icon n={s.via === 'lan' ? 'wifi' : 'cloud'} />{s.via === 'lan' ? '同じネットワークで接続中（直接接続）' : 'クラウド経由で接続中'}</div>
         </div>
         <div className="stats">
           <Stat icon={i?.charging ? 'battery_charging_full' : 'battery_horiz_075'} label="バッテリー" value={i ? i.battery + '%' : '—'} meter={i ? i.battery / 100 : 0} />
@@ -199,26 +200,26 @@ function Messages() {
   const send = (e: React.FormEvent) => {
     e.preventDefault(); const addr = th ? th.address : to
     if (!text || !addr) return
-    link.send({ t: 'sms_send', to: addr, body: text, threadId: sel }); setText('')
+    link.sendSms(addr, text, sel); setText('')
   }
   return (
     <div className="pane split">
       <div className="card threads">
-        <header className="pane-h"><h2>SMS</h2><button className="icon-btn filled" title="新規" onClick={() => setSel('new')}><Icon n="edit_square" /></button></header>
+        <header className="pane-h"><h2>メッセージ</h2><button className="icon-btn filled" title="新規" onClick={() => setSel('new')}><Icon n="edit_square" /></button></header>
         {s.threads.map((t) => (
           <button key={t.id} className={'thread ' + (sel === t.id ? 'sel' : '')} onClick={() => { setSel(t.id); link.openThread(t.id) }}>
             <div className="avatar letter">{(t.name || t.address).slice(0, 1)}</div>
             <div className="body"><div className="row"><b>{t.name || t.address}</b>{t.kind === 'rcs' && <span className="kind-chip">RCS</span>}{t.kind === 'mms' && <span className="kind-chip">MMS</span>}<span className="muted small">{fmtTime(t.time)}</span></div><p className="muted">{t.snippet}</p></div>
           </button>
         ))}
-        {!s.threads.length && <Empty icon="sms" text="SMS へのアクセスを許可すると表示されます" />}
+        {!s.threads.length && <Empty icon="sms" text="メッセージへのアクセスを許可すると表示されます" />}
       </div>
       <div className="card convo">
         {sel ? <>
-          <header className="convo-h">{sel === 'new' ? <input className="to" placeholder="宛先の電話番号" value={to} onChange={(e) => setTo(e.target.value)} /> : <><b>{th?.name || th?.address}</b><span className="muted small">{th?.address}</span>{th?.kind && <span className="kind-label">{th.kind === 'rcs' ? 'RCSメッセージ' : th.kind === 'mms' ? 'MMSメッセージ' : 'SMSメッセージ'}</span>}</>}
+          <header className="convo-h">{sel === 'new' ? <input className="to" placeholder="宛先の電話番号" value={to} onChange={(e) => setTo(e.target.value)} /> : <><b>{th?.name || th?.address}</b><span className="muted small">{th?.address}</span>{th?.kind && <span className="kind-label">{th.kind === 'rcs' ? 'RCSメッセージ' : th.kind === 'mms' ? 'MMSメッセージ' : 'メッセージ'}</span>}</>}
             {th && <button className="icon-btn" title="発信" onClick={() => link.send({ t: 'dial', number: th.address })}><Icon n="call" /></button>}</header>
           <div className="bubbles">{msgs.map((m) => <div key={m.id} className={'bubble ' + (m.mine ? 'mine' : '')}>{m.body}<span>{fmtTime(m.time)}</span></div>)}<div ref={end} /></div>
-          <form className="composer" onSubmit={send}><input placeholder={th?.kind === 'rcs' ? 'RCS の相手へ SMS で送信' : th?.kind === 'mms' ? 'MMS の相手へ SMS で送信' : 'SMS を入力'} value={text} onChange={(e) => setText(e.target.value)} /><button className="icon-btn filled big"><Icon n="send" fill /></button></form>
+          <form className="composer" onSubmit={send}><input placeholder={th?.kind === 'rcs' || th?.kind === 'mms' ? 'メッセージを入力（SMS として送信されます）' : 'メッセージを入力'} value={text} onChange={(e) => setText(e.target.value)} /><button className="icon-btn filled big"><Icon n="send" fill /></button></form>
         </> : <Empty icon="forum" text="会話を選択してください" />}
       </div>
     </div>
@@ -356,7 +357,7 @@ function Clipboard() {
 
 /* ---------- Shell ---------- */
 const NAV = [
-  ['home', 'ホーム', 'home'], ['notifs', '通知', 'notifications'], ['messages', 'SMS', 'chat'],
+  ['home', 'ホーム', 'home'], ['notifs', '通知', 'notifications'], ['messages', 'メッセージ', 'chat'],
   ['calls', '通話', 'call'], ['photos', '写真', 'photo_library'], ['files', 'Quick Share', 'nearby'], ['clip', 'クリップボード', 'content_paste'],
 ] as const
 

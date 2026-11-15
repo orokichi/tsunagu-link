@@ -142,6 +142,8 @@ fun PairScreen(onPaired: () -> Unit) {
         Text("PC とつなぐ", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold)
         Text("PC のブラウザで tsunagu-link.vercel.app を開き、表示された QR コードをスキャンしてください。",
             style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("コードの入力は初回だけです。次回からは、同じ Wi-Fi につながっていれば自動で接続します。",
+            style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Button(
             onClick = { scan.launch(ScanOptions().setPrompt("PC の QR コードを読み取る").setBeepEnabled(false).setOrientationLocked(false).setDesiredBarcodeFormats(ScanOptions.QR_CODE)) },
             shapes = ButtonDefaults.shapes(), modifier = Modifier.fillMaxWidth().height(64.dp)
@@ -193,6 +195,7 @@ fun granted(ctx: Context, p: Perm): Boolean = when (p.special) {
 fun HomeScreen(onUnpair: () -> Unit) {
     val ctx = LocalContext.current
     val status by LinkService.status.collectAsState()
+    val via by LinkService.via.collectAsState()
     val transfers by LinkService.transfers.collectAsState()
     var tick by remember { mutableIntStateOf(0) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { tick++ }
@@ -223,6 +226,14 @@ fun HomeScreen(onUnpair: () -> Unit) {
                         Text(if (connected) "接続中" else "PC を探しています", style = MaterialTheme.typography.labelLarge)
                         Text(if (connected) Prefs.pcName(ctx) else "PC でページを開いてください", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
                         Text("コード ${Prefs.code(ctx) ?: ""}", style = MaterialTheme.typography.bodyMedium)
+                        if (connected) Text(
+                            when (via) {
+                                "lan" -> "同じネットワークで直接接続中"
+                                "cloud" -> "クラウド経由で接続中"
+                                else -> ""
+                            },
+                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }

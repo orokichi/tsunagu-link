@@ -56,6 +56,10 @@ class LinkService : Service() {
         val status: StateFlow<String> = _status
         private val _transfers = MutableStateFlow<List<Transfer>>(emptyList())
         val transfers: StateFlow<List<Transfer>> = _transfers
+        /** Which transport the live connection uses: "lan" (direct, same network) or "cloud" (PeerJS). */
+        private val _via = MutableStateFlow("")
+        val via: StateFlow<String> = _via
+        @Volatile var lanPort: Int = 0
         @Volatile var lastClip: String = ""
 
         fun start(c: Context) {
@@ -76,10 +80,21 @@ class LinkService : Service() {
     private val incoming = HashMap<String, Pair<Uri, OutputStream>>()
     private val incomingMeta = HashMap<String, Transfer>()
     private var infoJob: Job? = null
-    private val fileQueue = kotlinx.coroutines.channels.Channel<JSONObject>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+    private val fileQueue = kotlinx.coroutines.channels.Channel<Pair<JSONObject, String>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+    // ---- LAN direct connection ----
+    private var lanServer: LanServer? = null
+    @Volatile private var activeVia: String? = null
+    @Volatile private var lanAnswer: String? = null
+    @Volatile private var lanLatch: java.util.concurrent.CountDownLatch? = null
+    private val lanBusy = java.util.concurrent.atomic.AtomicBoolean(false)
     private var ringer: Ringer? = null
     private val net = object : ConnectivityManager.NetworkCallback() {
-        override fun onAvailable(network: Network) { main.post { js("B.kick()") } }
+        override fun onAvailable(network: Network) {
+            main.post { js("B.kick()") }
+            // The LAN address may have changed with the network: push fresh info
+            // (which carries the current LAN endpoints) to the connected PC.
+            if (connected()) scope.launch { delay(800); sendInfo() }
+        }
     }
     private val battery = object : android.content.BroadcastReceiver() {
         var lastSig = ""
@@ -127,7 +142,29 @@ class LinkService : Service() {
             contentResolver.registerContentObserver(Telephony.Mms.CONTENT_URI, true, smsObserver)
         }
         features.watchMedia()
-        scope.launch { for (m in fileQueue) runCatching { handle(m) } }
+        scope.launch { for ((m, via) in fileQueue) runCatching { handle(m, via) } }
+        // LAN signaling endpoint: lets a paired PC on the same Wi-Fi connect
+        // directly (WebRTC) without the cloud. Auth = SHA-256 of the stored
+        // pairing token; only answers while this service runs.
+        lanServer = LanServer(
+            authHashes = { val t = Prefs.token(this); if (t.isEmpty()) emptySet() else setOf(sha256Hex(t)) },
+            deviceName = { features.hello(Prefs.token(this)).optString("name") },
+            onOffer = { sdp -> lanOffer(sdp) },
+        ).also { it.start(); lanPort = it.port }
+    }
+
+    /** Hands an SDP offer from the LAN server to the WebView bridge and waits for its answer. */
+    private fun lanOffer(sdp: String): String? {
+        if (!ready || !lanBusy.compareAndSet(false, true)) return null
+        try {
+            val latch = java.util.concurrent.CountDownLatch(1)
+            lanLatch = latch; lanAnswer = null
+            js("Lan.offer(${JSONObject.quote(sdp)})")
+            val ok = latch.await(9, java.util.concurrent.TimeUnit.SECONDS)
+            return if (ok) lanAnswer else null
+        } finally {
+            lanBusy.set(false)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -150,6 +187,8 @@ class LinkService : Service() {
         runCatching { unregisterReceiver(battery) }
         runCatching { contentResolver.unregisterContentObserver(smsObserver) }
         features.unwatchMedia()
+        lanServer?.stop(); lanServer = null; lanPort = 0
+        activeVia = null; _via.value = ""
         ringer?.stop()
         js("B.stop()")
         web?.destroy(); web = null
@@ -161,10 +200,25 @@ class LinkService : Service() {
     // ---------------- WebView / PeerJS bridge ----------------
     inner class Bridge {
         @JavascriptInterface fun onReady() { main.post { ready = true; boot() } }
-        @JavascriptInterface fun onStatus(s: String) { main.post { setStatus(s) } }
-        @JavascriptInterface fun onMessage(json: String) {
+        @JavascriptInterface fun onStatus(s: String) { main.post { if (activeVia != "lan") setStatus(s) } }
+        @JavascriptInterface fun onMessage(json: String, via: String) {
             val m = runCatching { JSONObject(json) }.getOrNull() ?: return
-            if (m.optString("t").startsWith("file_")) fileQueue.trySend(m) else scope.launch { handle(m) }
+            if (m.optString("t").startsWith("file_")) fileQueue.trySend(m to via) else scope.launch { handle(m, via) }
+        }
+        @JavascriptInterface fun onLanStatus(s: String) {
+            main.post {
+                // The active LAN transport went away: fall back to the cloud.
+                if (s == "closed" && activeVia == "lan") {
+                    activeVia = null; _via.value = ""
+                    infoJob?.cancel()
+                    setStatus("connecting")
+                    js("B.setActive('cloud')")
+                }
+            }
+        }
+        @JavascriptInterface fun onLanAnswer(sdp: String) {
+            lanAnswer = sdp.ifEmpty { null }
+            lanLatch?.countDown()
         }
     }
 
@@ -197,7 +251,15 @@ class LinkService : Service() {
         }
         if (v == _status.value) return
         _status.value = v
-        getSystemService(NotificationManager::class.java).notify(1, fgNotif(if (v == "connected") "${Prefs.pcName(this)} と接続中" else "PC を探しています…"))
+        refreshFg()
+    }
+
+    private fun refreshFg() {
+        val text = if (_status.value == "connected") {
+            val route = when (activeVia) { "lan" -> "（同じネットワークで直接接続）"; "cloud" -> "（クラウド経由）"; else -> "" }
+            "${Prefs.pcName(this)} と接続中$route"
+        } else "PC を探しています…"
+        getSystemService(NotificationManager::class.java).notify(1, fgNotif(text))
     }
 
     private fun js(code: String, cb: ((String) -> Unit)? = null) {
@@ -222,11 +284,13 @@ class LinkService : Service() {
     fun msg(t: String, vararg kv: Pair<String, Any?>) = JSONObject().put("t", t).also { o -> kv.forEach { o.put(it.first, it.second ?: JSONObject.NULL) } }
 
     // ---------------- Incoming messages ----------------
-    private suspend fun handle(m: JSONObject) {
+    private suspend fun handle(m: JSONObject, via: String = "cloud") {
         when (m.optString("t")) {
             "welcome" -> {
                 Prefs.setToken(this, m.optString("token"), m.optString("pc", "PC"))
-                withContext(Dispatchers.Main) { setStatus("connected") }
+                activeVia = via; _via.value = via
+                js("B.setActive(${JSONObject.quote(via)})")
+                withContext(Dispatchers.Main) { setStatus("connected"); refreshFg() }
                 sendInfo(); send(msg("notifs", "items" to features.notifications()))
                 infoJob?.cancel()
                 infoJob = scope.launch { while (isActive) { delay(60_000); sendInfo() } }

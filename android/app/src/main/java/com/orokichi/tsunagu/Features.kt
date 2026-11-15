@@ -7,6 +7,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -46,11 +47,33 @@ class Features(private val ctx: Context) {
     private fun has(p: String) = ctx.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
 
     // ---------- device ----------
+    /** This phone's site-local IPv4 addresses (Wi-Fi first) + the LAN signaling
+     *  port, so a paired PC on the same network can reach us directly. */
+    fun lanJson(): JSONObject {
+        val ips = JSONArray()
+        runCatching {
+            val ifs = java.net.NetworkInterface.getNetworkInterfaces().toList()
+                .filter { runCatching { it.isUp && !it.isLoopback }.getOrDefault(false) }
+                .sortedBy { if (it.name.startsWith("wlan")) 0 else 1 }
+            val seen = HashSet<String>()
+            for (ni in ifs) {
+                for (addr in ni.inetAddresses) {
+                    val h = addr.hostAddress ?: continue
+                    if (addr is java.net.Inet4Address && addr.isSiteLocalAddress && seen.add(h)) ips.put(h)
+                    if (ips.length() >= 4) break
+                }
+                if (ips.length() >= 4) break
+            }
+        }
+        return JSONObject().put("ips", ips).put("port", LinkService.lanPort)
+    }
+
     fun hello(token: String): JSONObject {
         val name = Settings.Global.getString(cr, Settings.Global.DEVICE_NAME) ?: Build.MODEL
         val seed = runCatching { String.format("#%06X", 0xFFFFFF and ctx.getColor(android.R.color.system_accent1_500)) }.getOrNull()
         return JSONObject().put("name", name).put("model", "${Build.MANUFACTURER} ${Build.MODEL}")
             .put("android", Build.VERSION.RELEASE).put("token", token).put("seed", seed ?: JSONObject.NULL)
+            .put("lan", lanJson())
     }
 
     @SuppressLint("MissingPermission")
@@ -74,6 +97,7 @@ class Features(private val ctx: Context) {
         return JSONObject().put("battery", level).put("charging", plugged).put("net", net)
             .put("carrier", tm?.networkOperatorName?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
             .put("storageFree", st.availableBytes).put("storageTotal", st.totalBytes).put("ringer", ringer)
+            .put("lan", lanJson())
     }
 
     // ---------- notifications ----------
@@ -235,11 +259,44 @@ class Features(private val ctx: Context) {
                 }
             }
         }
+        // Merge the local sent log: messages sent from the PC are not written to
+        // the provider by SmsManager (and our insert is refused on most devices),
+        // so without this they would vanish from the thread list entirely.
+        runCatching {
+            val sent = SentLog.all(ctx)
+            if (sent.isNotEmpty()) {
+                val threads = byId.values.toList()
+                for (t in threads) {
+                    val addr = t.getString("address")
+                    val latest = sent.filter { SentLog.sameNumber(it.address, addr) }.maxByOrNull { it.time } ?: continue
+                    // Provider already shows it (snippet matches & times are close): nothing to fix.
+                    if (t.getString("snippet") == latest.body && kotlin.math.abs(t.getLong("time") - latest.time) < 120_000) continue
+                    if (latest.time > t.getLong("time")) { t.put("snippet", latest.body); t.put("time", latest.time) }
+                }
+                // Conversations that exist only in the sent log (provider has nothing).
+                val orphanAddrs = sent.map { it.address }.distinct().filter { a -> threads.none { SentLog.sameNumber(it.getString("address"), a) } }
+                for (a in orphanAddrs) {
+                    val latest = sent.filter { SentLog.sameNumber(it.address, a) }.maxByOrNull { it.time } ?: continue
+                    byId[Long.MIN_VALUE + latest.time] = JSONObject().put("id", "local:$a").put("address", a)
+                        .put("name", contactName(a) ?: JSONObject.NULL).put("snippet", latest.body)
+                        .put("time", latest.time).put("unread", false).put("kind", "sms")
+                }
+            }
+        }
         val arr = JSONArray()
         byId.values.sortedByDescending { it.getLong("time") }.take(60).forEach { arr.put(it) }
         return arr
     }
     fun sms(threadId: String): JSONArray {
+        // Synthetic thread that exists only in the local sent log.
+        if (threadId.startsWith("local:")) {
+            val addr = threadId.removePrefix("local:")
+            val out = JSONArray()
+            SentLog.all(ctx).filter { SentLog.sameNumber(it.address, addr) }.sortedBy { it.time }.takeLast(150).forEach { e ->
+                out.put(JSONObject().put("id", "s${e.time}").put("body", e.body).put("time", e.time).put("mine", true).put("kind", "sms"))
+            }
+            return out
+        }
         val list = ArrayList<JSONObject>()
         if (!has(Manifest.permission.READ_SMS)) return JSONArray()
         runCatching {
@@ -262,17 +319,62 @@ class Features(private val ctx: Context) {
                 }
             }
         }
+        // Merge local sent-log entries for this thread's address that the
+        // provider does not have (dedup: same body, outgoing, within 2 minutes
+        // of a provider copy counts as the same message).
+        runCatching {
+            val addr = threadAddress(threadId)
+            if (addr != null) {
+                for (e in SentLog.all(ctx)) {
+                    if (!SentLog.sameNumber(e.address, addr)) continue
+                    val dup = list.any { it.getBoolean("mine") && it.getString("body") == e.body && kotlin.math.abs(it.getLong("time") - e.time) <= 120_000 }
+                    if (!dup) list.add(JSONObject().put("id", "s${e.time}").put("body", e.body).put("time", e.time).put("mine", true).put("kind", "sms"))
+                }
+            }
+        }
         list.sortBy { it.getLong("time") }
         return JSONArray(list.takeLast(150))
+    }
+    /** Best-effort address lookup for a provider thread id (SMS first, then MMS). */
+    private fun threadAddress(threadId: String): String? {
+        runCatching {
+            cr.query(Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms.ADDRESS), "${Telephony.Sms.THREAD_ID}=?", arrayOf(threadId), "${Telephony.Sms.DATE} DESC")?.use { c ->
+                if (c.moveToFirst()) return c.getString(0)
+            }
+        }
+        runCatching {
+            cr.query(Telephony.Mms.CONTENT_URI, arrayOf(Telephony.Mms._ID, Telephony.Mms.MESSAGE_BOX), "${Telephony.Mms.THREAD_ID}=?", arrayOf(threadId), "${Telephony.Mms.DATE} DESC")?.use { c ->
+                if (c.moveToFirst()) return mmsAddress(c.getLong(0), c.getInt(1) != Telephony.Mms.MESSAGE_BOX_INBOX)
+            }
+        }
+        return null
     }
     fun threadIdFor(address: String): String? = runCatching { Telephony.Threads.getOrCreateThreadId(ctx, address).toString() }.getOrNull()
     fun sendSms(to: String, body: String): Boolean {
         if (!has(Manifest.permission.SEND_SMS) || to.isBlank() || body.isBlank()) return false
-        return runCatching {
+        val sent = runCatching {
             val sm = ctx.getSystemService(SmsManager::class.java)
             sm.sendMultipartTextMessage(to, null, sm.divideMessage(body), null, null)
             true
         }.getOrDefault(false)
+        if (!sent) return false
+        // SmsManager never records what it sent. Try to write the sent copy to
+        // the provider (works when this app may write, e.g. as default SMS app;
+        // refused silently on most devices) and always keep a local record so
+        // the message shows up in Tsunagu's own history either way.
+        runCatching {
+            val values = ContentValues().apply {
+                put(Telephony.Sms.ADDRESS, to)
+                put(Telephony.Sms.BODY, body)
+                put(Telephony.Sms.DATE, System.currentTimeMillis())
+                put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_SENT)
+                put(Telephony.Sms.READ, 1)
+                threadIdFor(to)?.toLongOrNull()?.let { put(Telephony.Sms.THREAD_ID, it) }
+            }
+            cr.insert(Telephony.Sms.Sent.CONTENT_URI, values)
+        }
+        SentLog.add(ctx, to, body)
+        return true
     }
 
     // ---------- calls ----------
