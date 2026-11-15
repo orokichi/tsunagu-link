@@ -58,7 +58,7 @@ function Pairing() {
       <section className="pair-hero">
         <Cookie lobes={s.status === 'waiting' ? 9 : 6} className={'big spin ' + s.status}><Icon n="devices" fill /></Cookie>
         <h1>PC とスマホを、<br />ひとつに。</h1>
-        <p className="lead">通知・メッセージ・通話・写真・ファイル・クリップボードを、このブラウザからそのまま扱えます。</p>
+        <p className="lead">通知・メッセージ・通話・写真・Quick Share・クリップボードを、このブラウザからそのまま扱えます。</p>
         <ol className="steps">
           <li><span>1</span><div><b>Android アプリを入れる</b><a className="btn tonal" href={APK_URL} target="_blank" rel="noreferrer"><Icon n="android" />APK をダウンロード</a></div></li>
           <li><span>2</span><div><b>アプリで「PC とつなぐ」</b>右の QR をスキャン、またはコードを入力</div></li>
@@ -104,7 +104,7 @@ function Home({ go }: { go: (v: string) => void }) {
         <div className="btn-group">
           <button className="btn filled" onClick={() => link.send({ t: 'ring', on: true })}><Icon n="ring_volume" />スマホを鳴らす</button>
           <button className="btn tonal" onClick={() => link.pushClipboard(true)}><Icon n="content_paste_go" />クリップボード送信</button>
-          <label className="btn tonal"><Icon n="upload_file" />ファイル送信<input type="file" multiple hidden onChange={(e) => e.target.files && link.sendFiles(e.target.files)} /></label>
+          <label className="btn tonal"><Icon n="nearby" />Quick Share で送信<input type="file" multiple hidden onChange={(e) => e.target.files && link.sendFiles(e.target.files)} /></label>
         </div>
         <form className="url" onSubmit={(e) => { e.preventDefault(); if (url) { link.send({ t: 'open_url', url: /^https?:/.test(url) ? url : 'https://' + url }); setUrl(''); link.toast('スマホにリンクを送りました') } }}>
           <Icon n="link" /><input placeholder="スマホで開くリンク" value={url} onChange={(e) => setUrl(e.target.value)} /><button className="icon-btn filled" aria-label="送信"><Icon n="send" /></button>
@@ -303,15 +303,26 @@ function TransferRow({ t }: { t: Transfer }) {
 }
 function Files() {
   const s = useLink()
+  const sending = s.transfers.filter((t) => t.state === 'active' && t.dir === 'out')
+  const pct = sending.length ? Math.round((sending.reduce((a, t) => a + t.done / Math.max(t.size, 1), 0) / sending.length) * 100) : 0
   return (
     <div className="pane">
-      <header className="pane-h"><h2>ファイル共有</h2>{s.transfers.length > 0 && <button className="btn text" onClick={() => link.clearTransfers()}>履歴を消去</button>}</header>
-      <label className="drop card">
-        <Cookie lobes={7} className="spin slow"><Icon n="upload" /></Cookie>
-        <b>ここにファイルをドロップ</b><span className="muted">またはクリックして選択 — スマホの「ダウンロード/Tsunagu」に保存されます</span>
+      <header className="pane-h"><h2>Quick Share</h2>{s.transfers.length > 0 && <button className="btn text" onClick={() => link.clearTransfers()}>履歴を消去</button>}</header>
+      <label className={'qs-hero card' + (sending.length ? ' sending' : '')}>
+        <div className="qs-stage" aria-hidden="true">
+          <span className="qs-ring" /><span className="qs-ring r2" /><span className="qs-ring r3" />
+          <div className="qs-core"><Icon n="nearby" fill /></div>
+        </div>
+        <div className="overline">送信先</div>
+        <div className="qs-device">
+          <div className="qs-avatar"><Icon n="smartphone" fill /></div>
+          <div className="qs-name">{s.device?.name || 'スマホ'}</div>
+          <div className="muted small">{s.device?.model}{s.info ? ` · バッテリー ${s.info.battery}%${s.info.charging ? '（充電中）' : ''}` : ''}</div>
+        </div>
+        <p className="qs-status muted">{sending.length ? `送信中… ${pct}%` : 'タップしてファイルを選択 — この画面へのドラッグ＆ドロップでも送れます'}</p>
         <input type="file" multiple hidden onChange={(e) => e.target.files && link.sendFiles(e.target.files)} />
       </label>
-      <p className="muted small">スマホから送るには、ギャラリーやファイルアプリの「共有」→「Tsunagu」を選びます。</p>
+      <p className="muted small">受け取ったファイルはスマホの「ダウンロード/Tsunagu」に保存されます。スマホから送るには、ギャラリーやファイルアプリの「共有」→「Tsunagu」を選びます。</p>
       <div className="card list-card">{s.transfers.map((t) => <TransferRow key={t.id} t={t} />)}{!s.transfers.length && <Empty icon="swap_vert" text="転送履歴はありません" />}</div>
     </div>
   )
@@ -346,7 +357,7 @@ function Clipboard() {
 /* ---------- Shell ---------- */
 const NAV = [
   ['home', 'ホーム', 'home'], ['notifs', '通知', 'notifications'], ['messages', 'SMS', 'chat'],
-  ['calls', '通話', 'call'], ['photos', '写真', 'photo_library'], ['files', 'ファイル', 'folder_open'], ['clip', 'クリップボード', 'content_paste'],
+  ['calls', '通話', 'call'], ['photos', '写真', 'photo_library'], ['files', 'Quick Share', 'nearby'], ['clip', 'クリップボード', 'content_paste'],
 ] as const
 
 export default function App() {
@@ -380,7 +391,7 @@ export default function App() {
       </main>
       {s.pending && <div className="scrim"><div className="dialog"><Cookie lobes={6}><Icon n="phonelink_lock" /></Cookie><h3>{s.pending.name} が接続しようとしています</h3><p className="muted">コード入力で接続したデバイスです。許可すると、次回からは自動で接続されます。</p>
         <div className="dialog-actions"><button className="btn text" onClick={s.pending.reject}>拒否</button><button className="btn filled" onClick={s.pending.accept}>許可</button></div></div></div>}
-      {drag && <div className="drop-overlay"><Cookie lobes={9} className="spin big"><Icon n="upload" /></Cookie><b>ドロップしてスマホに送信</b></div>}
+      {drag && <div className="drop-overlay"><div className="qs-core lg"><Icon n="nearby" fill /></div><b>ドロップして{s.device ? `${s.device.name} に送信` : 'スマホに送信'}</b></div>}
       <div className="toasts">{s.toasts.map((t) => <div key={t.id} className="toast">{t.text}{t.action && <button onClick={t.action.run}>{t.action.label}</button>}</div>)}</div>
     </div>
   )
