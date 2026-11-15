@@ -300,6 +300,9 @@ fun HomeScreen(onUnpair: () -> Unit) {
                     }
                 }
             }
+            val ver = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() }
+            if (ver != null) Text("Tsunagu v$ver", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(24.dp))
         }
     }

@@ -18,7 +18,9 @@ function init() {
 function connect() {
   if (conn) { try { conn.close(); } catch (e) {} }
   st('connecting');
-  const c = peer.connect(target, { reliable: true, serialization: 'json' });
+  // 'binary' (BinaryPack) is required: PeerJS 'json' serialization silently drops
+  // any message >= 16300 bytes, which broke file chunks, photo lists and long SMS threads.
+  const c = peer.connect(target, { reliable: true, serialization: 'binary' });
   conn = c;
   c.on('open', () => { retry = 1500; c.send(Object.assign({ t: 'hello' }, hello)); });
   c.on('data', (d) => { try { N.onMessage(JSON.stringify(d)); } catch (e) {} });

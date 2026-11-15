@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import QRCode from 'qrcode'
-import { link, Photo, Transfer } from './link'
+import { link, Photo, Transfer, APP_VERSION } from './link'
 import { applyTheme } from './theme'
 
 const APK_URL = 'https://github.com/orokichi/tsunagu-link/releases/latest'
@@ -362,7 +362,7 @@ export default function App() {
             <span className="pill"><Icon n={ic} fill={view === k} />{badges[k] ? <em>{badges[k] > 99 ? '99+' : badges[k]}</em> : null}</span><span className="lbl">{l}</span>
           </button>
         ))}
-        <div className="rail-foot">{connected ? <button className="nav" title="接続を解除" onClick={() => { if (confirm('ペアリングを解除して新しいコードを作りますか？')) link.regenerate() }}><span className="pill"><Icon n="link_off" /></span><span className="lbl">解除</span></button> : null}</div>
+        <div className="rail-foot">{connected ? <button className="nav" title="接続を解除" onClick={() => { if (confirm('ペアリングを解除して新しいコードを作りますか？')) link.regenerate() }}><span className="pill"><Icon n="link_off" /></span><span className="lbl">解除</span></button> : null}<div className="muted small center">v{APP_VERSION}</div></div>
       </nav>
       <main>
         {s.incomingCall && <div className="call-banner"><Cookie lobes={8} className="spin"><Icon n="ring_volume" fill /></Cookie><div><div className="overline">着信</div><b>{s.incomingCall.name || s.incomingCall.number || '不明な番号'}</b></div>

@@ -292,8 +292,16 @@ class LinkService : Service() {
     private suspend fun finishIncoming(id: String) = withContext(Dispatchers.IO) {
         val (uri, out) = incoming.remove(id) ?: return@withContext
         runCatching { out.flush(); out.close() }
-        contentResolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
         val t = incomingMeta.remove(id)
+        // If fewer bytes arrived than the sender declared, the file would not open:
+        // drop the partial entry instead of publishing a corrupt download.
+        if (t != null && t.size > 0 && t.done != t.size) {
+            runCatching { contentResolver.delete(uri, null, null) }
+            updateTransfer(t.copy(state = "error"))
+            toast("ファイルが不完全なため保存しませんでした: ${t.name}")
+            return@withContext
+        }
+        contentResolver.update(uri, ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }, null, null)
         t?.let { updateTransfer(it.copy(done = it.size, state = "done")) }
         val open = Intent(Intent.ACTION_VIEW).setDataAndType(uri, contentResolver.getType(uri)).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         val pi = PendingIntent.getActivity(this@LinkService, id.hashCode(), open, PendingIntent.FLAG_IMMUTABLE)

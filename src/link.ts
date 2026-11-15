@@ -31,6 +31,7 @@ const ls = {
   set: (k: string, v: string) => localStorage.setItem('ts.' + k, v),
 }
 const CHUNK = 48 * 1024
+export const APP_VERSION = '1.0.2'
 
 function b64(buf: ArrayBuffer) {
   const u = new Uint8Array(buf); let s = ''
@@ -162,12 +163,21 @@ class Link {
       }
       case 'file_chunk': {
         const f = this.incoming.get(m.id); if (!f) return
-        const u = unb64(m.d); f.parts.push(u); f.t.done += u.length
+        let u: Uint8Array
+        try { u = unb64(m.d) } catch { this.incoming.delete(m.id); this.updT(m.id, { state: 'error' }); return }
+        f.parts.push(u); f.t.done += u.length
         this.updT(m.id, { done: f.t.done }); break
       }
       case 'file_end': {
         const f = this.incoming.get(m.id); if (!f) return
         this.incoming.delete(m.id)
+        // Never hand the user a truncated/corrupt file as if it were complete:
+        // if the received byte count differs from the declared size, fail visibly.
+        if (f.t.size > 0 && f.t.done !== f.t.size) {
+          this.updT(m.id, { state: 'error' })
+          this.toast(`ファイルが不完全なため保存しませんでした: ${f.t.name}（${f.t.done} / ${f.t.size} バイト）`)
+          break
+        }
         const url = URL.createObjectURL(new Blob(f.parts as BlobPart[], { type: f.t.mime }))
         this.updT(m.id, { state: 'done', url, done: f.t.size })
         const a = document.createElement('a'); a.href = url; a.download = f.t.name; a.click()
