@@ -150,7 +150,11 @@ class Features(private val ctx: Context) {
     // ---------- SMS / MMS / RCS ----------
     // content://sms holds plain SMS only. MMS and RCS messages live in content://mms,
     // so both providers must be merged or those conversations lose most of their history.
-    private fun mmsText(mid: Long): String {
+    /** Returns (body text, has non-text media part) for an MMS-provider entry.
+     *  Carrier MMS almost always carries SMIL + a media part, while RCS chats are
+     *  stored in this same provider as text-only entries — that distinction is what
+     *  the sms/rcs/mms "kind" labels are based on (no public API separates them). */
+    private fun mmsInfo(mid: Long): Pair<String, Boolean> {
         val texts = ArrayList<String>()
         var hasMedia = false
         runCatching {
@@ -162,12 +166,14 @@ class Features(private val ctx: Context) {
                 }
             }
         }
-        return when {
+        val body = when {
             texts.isNotEmpty() -> texts.joinToString("\n")
             hasMedia -> "（添付ファイル）"
             else -> ""
         }
+        return body to hasMedia
     }
+    private fun mmsKind(hasMedia: Boolean) = if (hasMedia) "mms" else "rcs"
     private fun mmsAddress(mid: Long, outgoing: Boolean): String {
         // addr types (PduHeaders): FROM = 137, TO = 151
         var fallback = ""
@@ -197,7 +203,7 @@ class Features(private val ctx: Context) {
                     if (byId.containsKey(tid)) continue
                     val addr = c.getString(1) ?: ""
                     byId[tid] = JSONObject().put("id", tid.toString()).put("address", addr).put("name", contactName(addr) ?: JSONObject.NULL)
-                        .put("snippet", c.getString(2) ?: "").put("time", c.getLong(3)).put("unread", c.getInt(4) == 0)
+                        .put("snippet", c.getString(2) ?: "").put("time", c.getLong(3)).put("unread", c.getInt(4) == 0).put("kind", "sms")
                 }
             }
         }
@@ -207,13 +213,25 @@ class Features(private val ctx: Context) {
             cr.query(Telephony.Mms.CONTENT_URI, arrayOf(Telephony.Mms.THREAD_ID, Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.READ, Telephony.Mms.MESSAGE_BOX),
                 null, null, "${Telephony.Mms.DATE} DESC")?.use { c ->
                 var scanned = 0
+                val kindChecked = HashSet<Long>()
                 while (c.moveToNext() && scanned++ < 1500) {
                     val tid = c.getLong(0); val mid = c.getLong(1); val time = c.getLong(2) * 1000
                     val cur = byId[tid]
-                    if (cur != null && cur.getLong("time") >= time) continue
+                    val isNewest = cur == null || cur.getLong("time") < time
+                    // The newest MMS-provider entry per thread also decides its kind
+                    // (text-only -> rcs, with media -> mms); computed at most once per
+                    // thread unless that entry becomes the thread's snippet.
+                    var info: Pair<String, Boolean>? = null
+                    if (isNewest || tid !in kindChecked) { info = mmsInfo(mid); kindChecked.add(tid) }
+                    if (info != null && cur != null) {
+                        val k = mmsKind(info.second)
+                        val ck = cur.getString("kind")
+                        if (ck == "sms" || (ck == "mms" && k == "rcs")) cur.put("kind", k)
+                    }
+                    if (!isNewest) continue
                     val addr = if (cur != null) cur.getString("address") else mmsAddress(mid, c.getInt(4) != Telephony.Mms.MESSAGE_BOX_INBOX)
                     byId[tid] = JSONObject().put("id", tid.toString()).put("address", addr).put("name", contactName(addr) ?: JSONObject.NULL)
-                        .put("snippet", mmsText(mid)).put("time", time).put("unread", c.getInt(3) == 0)
+                        .put("snippet", info!!.first).put("time", time).put("unread", c.getInt(3) == 0).put("kind", mmsKind(info.second))
                 }
             }
         }
@@ -229,7 +247,7 @@ class Features(private val ctx: Context) {
                 "${Telephony.Sms.THREAD_ID}=?", arrayOf(threadId), "${Telephony.Sms.DATE} DESC")?.use { c ->
                 while (c.moveToNext() && list.size < 1000) {
                     list.add(JSONObject().put("id", c.getString(0)).put("body", c.getString(1) ?: "").put("time", c.getLong(2))
-                        .put("mine", c.getInt(3) != Telephony.Sms.MESSAGE_TYPE_INBOX))
+                        .put("mine", c.getInt(3) != Telephony.Sms.MESSAGE_TYPE_INBOX).put("kind", "sms"))
                 }
             }
         }
@@ -238,8 +256,9 @@ class Features(private val ctx: Context) {
                 "${Telephony.Mms.THREAD_ID}=?", arrayOf(threadId), "${Telephony.Mms.DATE} DESC")?.use { c ->
                 while (c.moveToNext() && list.size < 2000) {
                     val mid = c.getLong(0)
-                    list.add(JSONObject().put("id", "m$mid").put("body", mmsText(mid)).put("time", c.getLong(1) * 1000)
-                        .put("mine", c.getInt(2) != Telephony.Mms.MESSAGE_BOX_INBOX))
+                    val (body, media) = mmsInfo(mid)
+                    list.add(JSONObject().put("id", "m$mid").put("body", body).put("time", c.getLong(1) * 1000)
+                        .put("mine", c.getInt(2) != Telephony.Mms.MESSAGE_BOX_INBOX).put("kind", mmsKind(media)))
                 }
             }
         }

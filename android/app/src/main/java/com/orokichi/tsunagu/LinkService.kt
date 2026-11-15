@@ -21,6 +21,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.provider.Telephony
 import android.util.Base64
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
@@ -81,10 +82,30 @@ class LinkService : Service() {
         override fun onAvailable(network: Network) { main.post { js("B.kick()") } }
     }
     private val battery = object : android.content.BroadcastReceiver() {
-        var last = -1
+        var lastSig = ""
         override fun onReceive(c: Context, i: Intent) {
-            val lv = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-            if (lv != last) { last = lv; if (connected()) sendInfo() }
+            // Push on plug/unplug and charging-state changes too, not only on 1%
+            // level steps; identical states are deduped so this never spams.
+            val sig = "${i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)}/${i.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)}/${i.getIntExtra(BatteryManager.EXTRA_STATUS, -1)}"
+            if (sig != lastSig) { lastSig = sig; if (connected()) sendInfo() }
+        }
+    }
+
+    // ---- Realtime SMS/MMS: watch both providers and push fresh threads/history ----
+    @Volatile private var watchedThread: String? = null
+    private var smsPushJob: Job? = null
+    private val smsObserver = object : android.database.ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) = scheduleSmsPush()
+        override fun onChange(selfChange: Boolean, uri: Uri?) = scheduleSmsPush()
+    }
+    private fun scheduleSmsPush() {
+        if (!connected()) return
+        smsPushJob?.cancel()
+        smsPushJob = scope.launch {
+            delay(700) // bursts of provider writes collapse into one push
+            if (!connected()) return@launch
+            send(msg("threads", "items" to features.threads()))
+            watchedThread?.let { send(msg("sms", "threadId" to it, "items" to features.sms(it))) }
         }
     }
 
@@ -101,6 +122,10 @@ class LinkService : Service() {
         createWeb()
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(net)
         registerReceiver(battery, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        runCatching {
+            contentResolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, smsObserver)
+            contentResolver.registerContentObserver(Telephony.Mms.CONTENT_URI, true, smsObserver)
+        }
         features.watchMedia()
         scope.launch { for (m in fileQueue) runCatching { handle(m) } }
     }
@@ -123,6 +148,7 @@ class LinkService : Service() {
         instance = null
         runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(net) }
         runCatching { unregisterReceiver(battery) }
+        runCatching { contentResolver.unregisterContentObserver(smsObserver) }
         features.unwatchMedia()
         ringer?.stop()
         js("B.stop()")
@@ -210,7 +236,7 @@ class LinkService : Service() {
                 "notifs" -> send(msg("notifs", "items" to features.notifications()))
                 "media" -> send(msg("media", "state" to features.mediaState()))
                 "threads" -> send(msg("threads", "items" to features.threads()))
-                "sms" -> m.optString("threadId").let { send(msg("sms", "threadId" to it, "items" to features.sms(it))) }
+                "sms" -> m.optString("threadId").let { watchedThread = it; send(msg("sms", "threadId" to it, "items" to features.sms(it))) }
                 "calls" -> send(msg("calls", "items" to features.calls()))
                 "photos" -> {
                     val off = m.optInt("offset", 0)
@@ -225,6 +251,7 @@ class LinkService : Service() {
             "sms_send" -> {
                 val ok = features.sendSms(m.optString("to"), m.optString("body"))
                 toast(if (ok) "SMS を送信しました" else "SMS を送信できませんでした（権限を確認してください）")
+                m.optString("threadId").takeIf { it.isNotEmpty() && it != "new" }?.let { watchedThread = it }
                 delay(1500)
                 send(msg("threads", "items" to features.threads()))
                 m.optString("threadId").takeIf { it.isNotEmpty() && it != "new" }?.let { send(msg("sms", "threadId" to it, "items" to features.sms(it))) }

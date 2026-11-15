@@ -5,8 +5,8 @@ export interface Device { name: string; model: string; android: string }
 export interface Info { battery: number; charging: boolean; net: string; carrier?: string; storageFree: number; storageTotal: number; ringer?: string }
 export interface Notif { key: string; app: string; pkg: string; title: string; text: string; time: number; icon?: string; reply?: boolean; actions?: string[] }
 export interface Media { app: string; title: string; artist: string; playing: boolean; art?: string; position?: number; duration?: number }
-export interface Thread { id: string; address: string; name?: string; snippet: string; time: number; unread?: boolean }
-export interface Sms { id: string; body: string; time: number; mine: boolean }
+export interface Thread { id: string; address: string; name?: string; snippet: string; time: number; unread?: boolean; kind?: 'sms' | 'rcs' | 'mms' }
+export interface Sms { id: string; body: string; time: number; mine: boolean; kind?: 'sms' | 'rcs' | 'mms' }
 export interface Call { number: string; name?: string; type: number; time: number; duration: number }
 export interface Photo { id: string; video: boolean; time: number; thumb: string; duration?: number; name: string; size: number }
 export interface Transfer { id: string; name: string; size: number; mime: string; done: number; dir: 'in' | 'out'; state: 'active' | 'done' | 'error'; url?: string }
@@ -22,6 +22,7 @@ export interface State {
   transfers: Transfer[]; clips: Clip[]; toasts: Toast[]
   pending?: { name: string; accept: () => void; reject: () => void }
   incomingCall?: { number: string; name?: string } | null
+  focusNotif?: string
 }
 
 const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -31,7 +32,7 @@ const ls = {
   set: (k: string, v: string) => localStorage.setItem('ts.' + k, v),
 }
 const CHUNK = 48 * 1024
-export const APP_VERSION = '1.0.2'
+export const APP_VERSION = '1.0.3'
 
 function b64(buf: ArrayBuffer) {
   const u = new Uint8Array(buf); let s = ''
@@ -53,8 +54,17 @@ class Link {
     let code = ls.get('code'); let secret = ls.get('secret')
     if (!code) { code = rand(6); ls.set('code', code) }
     if (!secret) { secret = rand(20); ls.set('secret', secret) }
-    this.state = { status: 'starting', code, secret, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined }
+    const focusNotif = new URLSearchParams(location.search).get('notif') || undefined
+    this.state = { status: 'starting', code, secret, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif }
     this.start()
+    // Replies / action taps typed into desktop notifications come back from the
+    // service worker; relay them to the phone over the paired connection only.
+    navigator.serviceWorker?.addEventListener('message', (e) => {
+      const d = e.data || {}
+      if (d.type === 'notif_reply' && d.key && d.text) { this.send({ t: 'notif_reply', key: d.key, text: d.text }); this.toast('返信を送信しました') }
+      else if (d.type === 'notif_action' && d.key) this.send({ t: 'notif_action', key: d.key, index: d.index | 0 })
+      else if (d.type === 'focus_notif' && d.key) this.set({ focusNotif: d.key })
+    })
     window.addEventListener('focus', () => this.pushClipboard(false))
     document.addEventListener('visibilitychange', () => { if (!document.hidden) this.pushClipboard(false) })
   }
@@ -109,9 +119,29 @@ class Link {
     const id = ++this.toastId; this.set({ toasts: [...this.state.toasts, { id, text, action }] })
     setTimeout(() => this.set({ toasts: this.state.toasts.filter((t) => t.id !== id) }), action ? 8000 : 3500)
   }
-  private notify(title: string, body: string, icon?: string) {
+  clearFocusNotif() { if (this.state.focusNotif) this.set({ focusNotif: undefined }) }
+
+  private notify(title: string, body: string, rich?: { key?: string; reply?: boolean; actions?: string[]; icon?: string }) {
     if (document.hasFocus() || !('Notification' in window) || Notification.permission !== 'granted') return
-    try { new Notification(title, { body, icon: icon ? 'data:image/png;base64,' + icon : '/icon.svg', silent: false }) } catch {}
+    const icon = rich?.icon ? 'data:image/png;base64,' + rich.icon : '/icons/icon-192.png'
+    // Prefer the service worker: only SW notifications can carry action buttons
+    // and the inline text reply (used e.g. to answer LINE without opening the app).
+    const viaSw = async () => {
+      const reg = await navigator.serviceWorker?.getRegistration()
+      if (!reg) throw new Error('no sw')
+      const actions: any[] = []
+      if (rich?.reply) actions.push({ action: 'reply', type: 'text', title: '返信', placeholder: '返信を入力…' })
+      for (const [i, t] of (rich?.actions || []).entries()) {
+        if (actions.length >= 2) break
+        actions.push({ action: 'a' + i, title: t })
+      }
+      await reg.showNotification(title, {
+        body, icon, tag: rich?.key, renotify: !!rich?.key,
+        data: { key: rich?.key || '' },
+        actions: actions.length ? actions : undefined,
+      } as NotificationOptions)
+    }
+    viaSw().catch(() => { try { new Notification(title, { body, icon }) } catch {} })
   }
 
   private onData(c: DataConnection, m: any) {
@@ -130,7 +160,7 @@ class Link {
       case 'notif': {
         const n: Notif = m.item
         this.set({ notifs: [n, ...s.notifs.filter((x) => x.key !== n.key)] })
-        if (m.fresh) this.notify(`${n.app}: ${n.title}`, n.text, n.icon)
+        if (m.fresh) this.notify(`${n.app}: ${n.title}`, n.text, { key: n.key, reply: n.reply, actions: n.actions, icon: n.icon })
         break
       }
       case 'notif_rm': this.set({ notifs: s.notifs.filter((x) => x.key !== m.key) }); break

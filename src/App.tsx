@@ -151,8 +151,10 @@ function MediaCard() {
 }
 
 /* ---------- Notifications ---------- */
-function NotifRow({ n, compact }: { n: import('./link').Notif; compact?: boolean }) {
+function NotifRow({ n, compact, autoReply }: { n: import('./link').Notif; compact?: boolean; autoReply?: boolean }) {
   const [reply, setReply] = useState<string | null>(null)
+  // Opened from a desktop notification click: jump straight into the reply box.
+  useEffect(() => { if (autoReply) { if (n.reply) setReply(''); link.clearFocusNotif() } }, [autoReply])
   return (
     <div className="notif">
       <div className="avatar">{n.icon ? <img src={'data:image/png;base64,' + n.icon} alt="" /> : <Icon n="notifications" />}</div>
@@ -172,10 +174,14 @@ function NotifRow({ n, compact }: { n: import('./link').Notif; compact?: boolean
 }
 function Notifs() {
   const s = useLink()
+  const perm = typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'
   return (
     <div className="pane">
-      <header className="pane-h"><h2>通知</h2><button className="btn tonal" onClick={() => link.send({ t: 'notif_dismiss', key: '*' })}><Icon n="clear_all" />すべて消去</button></header>
-      <div className="card list-card">{s.notifs.map((n) => <NotifRow key={n.key} n={n} />)}{!s.notifs.length && <Empty icon="notifications_off" text="通知はありません（アプリで通知へのアクセスを許可してください）" />}</div>
+      <header className="pane-h"><h2>通知</h2>
+        {perm === 'default' && <button className="btn tonal" onClick={() => Notification.requestPermission()}><Icon n="notifications_active" />ブラウザ通知を有効化</button>}
+        {perm === 'denied' && <span className="muted small">ブラウザ通知がブロックされています（ブラウザの設定から許可してください）</span>}
+        <button className="btn tonal" onClick={() => link.send({ t: 'notif_dismiss', key: '*' })}><Icon n="clear_all" />すべて消去</button></header>
+      <div className="card list-card">{s.notifs.map((n) => <NotifRow key={n.key} n={n} autoReply={s.focusNotif === n.key} />)}{!s.notifs.length && <Empty icon="notifications_off" text="通知はありません（アプリで通知へのアクセスを許可してください）" />}</div>
     </div>
   )
 }
@@ -198,21 +204,21 @@ function Messages() {
   return (
     <div className="pane split">
       <div className="card threads">
-        <header className="pane-h"><h2>メッセージ</h2><button className="icon-btn filled" title="新規" onClick={() => setSel('new')}><Icon n="edit_square" /></button></header>
+        <header className="pane-h"><h2>SMS</h2><button className="icon-btn filled" title="新規" onClick={() => setSel('new')}><Icon n="edit_square" /></button></header>
         {s.threads.map((t) => (
           <button key={t.id} className={'thread ' + (sel === t.id ? 'sel' : '')} onClick={() => { setSel(t.id); link.openThread(t.id) }}>
             <div className="avatar letter">{(t.name || t.address).slice(0, 1)}</div>
-            <div className="body"><div className="row"><b>{t.name || t.address}</b><span className="muted small">{fmtTime(t.time)}</span></div><p className="muted">{t.snippet}</p></div>
+            <div className="body"><div className="row"><b>{t.name || t.address}</b>{t.kind === 'rcs' && <span className="kind-chip">RCS</span>}{t.kind === 'mms' && <span className="kind-chip">MMS</span>}<span className="muted small">{fmtTime(t.time)}</span></div><p className="muted">{t.snippet}</p></div>
           </button>
         ))}
         {!s.threads.length && <Empty icon="sms" text="SMS へのアクセスを許可すると表示されます" />}
       </div>
       <div className="card convo">
         {sel ? <>
-          <header className="convo-h">{sel === 'new' ? <input className="to" placeholder="宛先の電話番号" value={to} onChange={(e) => setTo(e.target.value)} /> : <><b>{th?.name || th?.address}</b><span className="muted small">{th?.address}</span></>}
+          <header className="convo-h">{sel === 'new' ? <input className="to" placeholder="宛先の電話番号" value={to} onChange={(e) => setTo(e.target.value)} /> : <><b>{th?.name || th?.address}</b><span className="muted small">{th?.address}</span>{th?.kind && <span className="kind-label">{th.kind === 'rcs' ? 'RCSメッセージ' : th.kind === 'mms' ? 'MMSメッセージ' : 'SMSメッセージ'}</span>}</>}
             {th && <button className="icon-btn" title="発信" onClick={() => link.send({ t: 'dial', number: th.address })}><Icon n="call" /></button>}</header>
           <div className="bubbles">{msgs.map((m) => <div key={m.id} className={'bubble ' + (m.mine ? 'mine' : '')}>{m.body}<span>{fmtTime(m.time)}</span></div>)}<div ref={end} /></div>
-          <form className="composer" onSubmit={send}><input placeholder="SMS を入力" value={text} onChange={(e) => setText(e.target.value)} /><button className="icon-btn filled big"><Icon n="send" fill /></button></form>
+          <form className="composer" onSubmit={send}><input placeholder={th?.kind === 'rcs' ? 'RCS の相手へ SMS で送信' : th?.kind === 'mms' ? 'MMS の相手へ SMS で送信' : 'SMS を入力'} value={text} onChange={(e) => setText(e.target.value)} /><button className="icon-btn filled big"><Icon n="send" fill /></button></form>
         </> : <Empty icon="forum" text="会話を選択してください" />}
       </div>
     </div>
@@ -339,7 +345,7 @@ function Clipboard() {
 
 /* ---------- Shell ---------- */
 const NAV = [
-  ['home', 'ホーム', 'home'], ['notifs', '通知', 'notifications'], ['messages', 'メッセージ', 'chat'],
+  ['home', 'ホーム', 'home'], ['notifs', '通知', 'notifications'], ['messages', 'SMS', 'chat'],
   ['calls', '通話', 'call'], ['photos', '写真', 'photo_library'], ['files', 'ファイル', 'folder_open'], ['clip', 'クリップボード', 'content_paste'],
 ] as const
 
@@ -349,6 +355,7 @@ export default function App() {
   const [drag, setDrag] = useState(false)
   useEffect(() => { applyTheme(s.seed); const mq = matchMedia('(prefers-color-scheme: dark)'); const f = () => applyTheme(s.seed); mq.addEventListener('change', f); return () => mq.removeEventListener('change', f) }, [s.seed])
   const connected = s.status === 'connected'
+  useEffect(() => { if (s.focusNotif) setView('notifs') }, [s.focusNotif])
   const badges = useMemo(() => ({ notifs: s.notifs.length } as Record<string, number>), [s.notifs.length])
   return (
     <div className={'app ' + (drag ? 'dragging' : '')}
