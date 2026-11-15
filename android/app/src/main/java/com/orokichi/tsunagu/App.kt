@@ -34,7 +34,11 @@ object Prefs {
     fun pcName(c: Context): String = p(c).getString("pc", "PC") ?: "PC"
     fun pair(c: Context, code: String, token: String) = p(c).edit().putString("code", code.uppercase()).putString("token", token).apply()
     fun setToken(c: Context, token: String, pc: String) = p(c).edit().putString("token", token).putString("pc", pc).apply()
-    fun unpair(c: Context) = p(c).edit().clear().apply()
+    fun unpair(c: Context) {
+        p(c).edit().clear().apply()
+        // Web Push subscriptions belong to the pairing; drop them too.
+        runCatching { WebPushStore.clearAll(c) }
+    }
     fun paired(c: Context) = code(c) != null
 }
 

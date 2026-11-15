@@ -299,13 +299,40 @@ class LinkService : Service() {
     private suspend fun handle(m: JSONObject, via: String = "cloud") {
         when (m.optString("t")) {
             "welcome" -> {
-                Prefs.setToken(this, m.optString("token"), m.optString("pc", "PC"))
+                val previousToken = Prefs.token(this)
+                val newToken = m.optString("token")
+                // A fresh token means the PC re-paired (or the pairing was
+                // reset): subscriptions registered under the old token must
+                // not receive pushes any more.
+                if (previousToken.isNotEmpty() && previousToken != newToken) {
+                    WebPushStore.clearToken(this, previousToken)
+                }
+                Prefs.setToken(this, newToken, m.optString("pc", "PC"))
                 activeVia = via; _via.value = via
                 js("B.setActive(${JSONObject.quote(via)})")
                 withContext(Dispatchers.Main) { setStatus("connected"); refreshFg() }
                 sendInfo(); send(msg("notifs", "items" to features.notifications()))
                 infoJob?.cancel()
                 infoJob = scope.launch { while (isActive) { delay(60_000); sendInfo() } }
+            }
+            "push_subscribe" -> {
+                // The PC hands over its browser PushSubscription so the phone
+                // can reach it with Web Push while the Tsunagu page is closed.
+                // Stored against the pairing token that owns this connection.
+                val token = m.optString("pcToken").ifEmpty { Prefs.token(this) }
+                val sub = m.optJSONObject("subscription")
+                val ok = sub != null && withContext(Dispatchers.IO) {
+                    runCatching { WebPushStore.saveSubscription(this@LinkService, token, sub) }.getOrDefault(false)
+                }
+                send(msg("push_state", "subscribed" to ok, "endpoint" to (sub?.optString("endpoint") ?: "")))
+            }
+            "push_unsubscribe" -> {
+                val token = m.optString("pcToken").ifEmpty { Prefs.token(this) }
+                val endpoint = m.optString("endpoint")
+                withContext(Dispatchers.IO) {
+                    runCatching { WebPushStore.removeSubscription(this@LinkService, token, endpoint) }
+                }
+                send(msg("push_state", "subscribed" to false, "endpoint" to endpoint))
             }
             "get" -> when (m.optString("what")) {
                 "info" -> sendInfo()
@@ -417,7 +444,16 @@ class LinkService : Service() {
         send(msg("clip", "text" to text))
     }
 
-    fun onNotification(item: JSONObject, fresh: Boolean) = send(msg("notif", "item" to item, "fresh" to fresh))
+    fun onNotification(item: JSONObject, fresh: Boolean) {
+        if (fresh && !connected()) {
+            // The PC page is not live: deliver through Web Push instead, so
+            // the two paths never show the same notification twice. Sending
+            // does network I/O, so it runs off the listener thread.
+            scope.launch(Dispatchers.IO) { runCatching { WebPushSender.sendToAll(this@LinkService, item) } }
+            return
+        }
+        send(msg("notif", "item" to item, "fresh" to fresh))
+    }
     fun onNotificationRemoved(key: String) = send(msg("notif_rm", "key" to key))
     fun onMedia(state: JSONObject?) = send(msg("media", "state" to state))
     fun onSms(address: String, body: String) = scope.launch {

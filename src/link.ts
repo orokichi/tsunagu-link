@@ -17,8 +17,10 @@ export interface Transfer { id: string; name: string; size: number; mime: string
 export interface Clip { text: string; time: number; from: 'pc' | 'phone' }
 export interface Toast { id: number; text: string; action?: { label: string; run: () => void } }
 
+export type PushState = 'unsupported' | 'off' | 'on' | 'blocked' | 'busy' | 'error'
 export interface State {
   status: Status; code: string; secret: string; error?: string
+  pushState: PushState; pushSynced: boolean
   device?: Device; info?: Info; seed?: string; via?: Via
   notifs: Notif[]; media?: Media | null
   threads: Thread[]; sms: Record<string, Sms[]>
@@ -39,7 +41,7 @@ const ls = {
   del: (k: string) => localStorage.removeItem('ts.' + k),
 }
 const CHUNK = 48 * 1024
-export const APP_VERSION = '1.0.5'
+export const APP_VERSION = '1.0.6'
 
 function b64(buf: ArrayBuffer) {
   const u = new Uint8Array(buf); let s = ''
@@ -47,6 +49,79 @@ function b64(buf: ArrayBuffer) {
   return btoa(s)
 }
 function unb64(s: string) { const bin = atob(s); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u }
+
+// ---------------------------------------------------------------------------
+// Web Push (receive phone notifications while this page is closed).
+//
+// There is no push server: the phone itself is the application server. It
+// generates a VAPID key pair and hands the public key over in its hello; this
+// page subscribes through PushManager with that key and sends the resulting
+// PushSubscription back over the paired connection, so the phone can encrypt
+// (RFC 8291) and POST pushes directly to the browser's push service.
+// ---------------------------------------------------------------------------
+export const pushSupported = () =>
+  typeof window !== 'undefined' && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
+
+function urlB64ToUint8Array(s: string) {
+  const pad = '='.repeat((4 - (s.length % 4)) % 4)
+  const bin = atob((s + pad).replace(/-/g, '+').replace(/_/g, '/'))
+  const u = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i)
+  return u
+}
+function bufToB64Url(buf: ArrayBuffer) {
+  return b64(buf).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+// Offline outbox shared with the service worker (same origin, same database).
+// A reply typed into a push notification while no page is open is stored here
+// by the SW and flushed by the page the next time it connects to the phone —
+// an SW cannot hold the WebRTC connection itself.
+const IDB_NAME = 'tsunagu-offline'
+function idbOpen(): Promise<IDBDatabase | null> {
+  return new Promise((res) => {
+    try {
+      const r = indexedDB.open(IDB_NAME, 1)
+      r.onupgradeneeded = () => { try { r.result.createObjectStore('queue', { keyPath: 'id', autoIncrement: true }) } catch {} }
+      r.onsuccess = () => res(r.result)
+      r.onerror = () => res(null)
+    } catch { res(null) }
+  })
+}
+async function idbAdd(rec: any) {
+  const db = await idbOpen(); if (!db) return
+  await new Promise<void>((res) => {
+    try {
+      const tx = db.transaction('queue', 'readwrite')
+      tx.objectStore('queue').add(rec)
+      tx.oncomplete = () => res(); tx.onerror = () => res()
+    } catch { res() }
+  })
+  db.close()
+}
+async function idbAll(): Promise<any[]> {
+  const db = await idbOpen(); if (!db) return []
+  const out = await new Promise<any[]>((res) => {
+    try {
+      const rq = db.transaction('queue', 'readonly').objectStore('queue').getAll()
+      rq.onsuccess = () => res(rq.result || [])
+      rq.onerror = () => res([])
+    } catch { res([]) }
+  })
+  db.close()
+  return out
+}
+async function idbDel(id: number) {
+  const db = await idbOpen(); if (!db) return
+  await new Promise<void>((res) => {
+    try {
+      const tx = db.transaction('queue', 'readwrite')
+      tx.objectStore('queue').delete(id)
+      tx.oncomplete = () => res(); tx.onerror = () => res()
+    } catch { res() }
+  })
+  db.close()
+}
 
 // ---------------------------------------------------------------------------
 // Transports. The app protocol is identical JSON messages over either:
@@ -159,13 +234,16 @@ class Link {
   private incoming = new Map<string, { parts: Uint8Array[]; t: Transfer }>()
   private toastId = 0
   private lastClip = ''
+  private vapid?: string
+  private pcToken = ''
+  private pushEndpoint = ''
 
   constructor() {
     let code = ls.get('code'); let secret = ls.get('secret')
     if (!code) { code = rand(6); ls.set('code', code) }
     if (!secret) { secret = rand(20); ls.set('secret', secret) }
     const focusNotif = new URLSearchParams(location.search).get('notif') || undefined
-    this.state = { status: 'starting', code, secret, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false }
+    this.state = { status: 'starting', code, secret, pushState: pushSupported() ? (ls.get('push') === '1' ? 'on' : 'off') : 'unsupported', pushSynced: false, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false }
     this.start()
     // If we already know the phone's LAN endpoints (learned during a previous
     // pairing), try the direct route right away; keep retrying while offline
@@ -176,10 +254,16 @@ class Link {
     // service worker; relay them to the phone over the paired connection only.
     navigator.serviceWorker?.addEventListener('message', (e) => {
       const d = e.data || {}
-      if (d.type === 'notif_reply' && d.key && d.text) { this.send({ t: 'notif_reply', key: d.key, text: d.text }); this.toast('返信を送信しました') }
-      else if (d.type === 'notif_action' && d.key) this.send({ t: 'notif_action', key: d.key, index: d.index | 0 })
+      if (d.type === 'notif_reply' && d.key && d.text) this.relayReply(d.key, d.text)
+      else if (d.type === 'notif_action' && d.key) {
+        if (this.conn?.open) this.send({ t: 'notif_action', key: d.key, index: d.index | 0 })
+        else { void idbAdd({ kind: 'action', key: d.key, index: d.index | 0, time: Date.now() }); this.toast('操作を保存しました（接続時に実行します）') }
+      }
+      else if (d.type === 'push_queue_changed') void this.drainOfflineQueue()
       else if (d.type === 'focus_notif' && d.key) this.set({ focusNotif: d.key })
     })
+    void this.refreshPushState()
+    void this.drainOfflineQueue()
     window.addEventListener('focus', () => this.pushClipboard(false))
     document.addEventListener('visibilitychange', () => { if (!document.hidden) this.pushClipboard(false) })
   }
@@ -202,8 +286,13 @@ class Link {
   }
 
   regenerate() {
+    // A new pairing code invalidates the old pairing: drop the Web Push
+    // subscription too (the phone discards it with the old token as well).
+    // It can be re-enabled after the new pairing connects.
+    void this.disablePush()
+    this.vapid = undefined; this.pcToken = ''
     const code = rand(6), secret = rand(20); ls.set('code', code); ls.set('secret', secret); ls.set('trusted', '[]'); ls.del('lan')
-    this.conn?.close(); this.pendingLan?.close(); this.set({ code, secret, status: 'starting', device: undefined, via: undefined }); this.start()
+    this.conn?.close(); this.pendingLan?.close(); this.set({ code, secret, status: 'starting', device: undefined, via: undefined, pushSynced: false }); this.start()
   }
 
   get qrText() { return `tsunagu:${this.state.code}:${this.state.secret}` }
@@ -220,7 +309,7 @@ class Link {
     if (this.pendingLan === t) { this.pendingLan = undefined; return }
     if (this.conn === t) {
       this.conn = undefined
-      this.set({ status: 'waiting', via: undefined, media: undefined, incomingCall: null })
+      this.set({ status: 'waiting', via: undefined, media: undefined, incomingCall: null, pushSynced: false })
       this.toast('スマートフォンとの接続が切れました')
       setTimeout(() => this.tryLan(), 3000)
     }
@@ -234,11 +323,17 @@ class Link {
     const trusted: string[] = JSON.parse(ls.get('trusted') || '[]')
     if (!trusted.includes(token)) { token = rand(24); trusted.push(token); ls.set('trusted', JSON.stringify(trusted.slice(-10))) }
     c.send({ t: 'welcome', token, pc: navigator.userAgent.includes('Windows') ? 'Windows PC' : 'PC' })
+    this.pcToken = token
+    if (hello.vapid) this.vapid = hello.vapid
     if (hello.seed) ls.set('seed', hello.seed)
     this.learnLan(hello.lan)
     this.set({ status: 'connected', via: c.kind, device: { name: hello.name, model: hello.model, android: hello.android }, seed: hello.seed || this.state.seed, pending: undefined })
     for (const what of ['info', 'notifs', 'media', 'threads', 'calls']) this.send({ t: 'get', what })
     this.getPhotos(true)
+    // (Re)register the Web Push subscription with this pairing and flush any
+    // replies that were queued while the page was closed.
+    void this.syncPushSubscription()
+    void this.drainOfflineQueue()
     this.toast(`${hello.name} と接続しました`)
     if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission()
   }
@@ -249,6 +344,119 @@ class Link {
     setTimeout(() => this.set({ toasts: this.state.toasts.filter((t) => t.id !== id) }), action ? 8000 : 3500)
   }
   clearFocusNotif() { if (this.state.focusNotif) this.set({ focusNotif: undefined }) }
+
+  // ---------------- Web Push （閉じていても通知） ----------------
+  /** Reflect the browser-side subscription state (permission + saved intent). */
+  private async refreshPushState() {
+    if (!pushSupported()) { this.set({ pushState: 'unsupported' }); return }
+    if (Notification.permission === 'denied') { this.set({ pushState: 'blocked' }); return }
+    if (ls.get('push') !== '1') { this.set({ pushState: 'off' }); return }
+    this.set({ pushState: 'on' })
+    try {
+      const reg = await Promise.race([
+        navigator.serviceWorker.ready,
+        new Promise<null>((r) => setTimeout(() => r(null), 3000)),
+      ])
+      const sub = await (reg as ServiceWorkerRegistration | null)?.pushManager.getSubscription().catch(() => null)
+      if (sub) this.pushEndpoint = sub.endpoint
+    } catch {}
+    if (this.conn?.open) void this.syncPushSubscription()
+  }
+
+  /** User action: turn closed-app notifications on (asks permission if needed). */
+  async enablePush() {
+    if (!pushSupported()) { this.set({ pushState: 'unsupported' }); this.toast('このブラウザは Web Push に対応していません'); return }
+    this.set({ pushState: 'busy' })
+    try {
+      let perm = Notification.permission
+      if (perm === 'default') perm = await Notification.requestPermission()
+      if (perm !== 'granted') { this.set({ pushState: 'blocked' }); this.toast('ブラウザ通知が許可されていません'); return }
+      ls.set('push', '1')
+      const ok = await this.syncPushSubscription()
+      if (ok) { this.set({ pushState: 'on' }); this.toast(this.conn?.open ? '閉じていても通知を受け取ります' : '有効にしました（スマホ接続時に登録されます）') }
+      else if (!this.vapid) { this.set({ pushState: 'on' }); this.toast('有効にしました（スマホ接続時に登録されます）') }
+      else { this.set({ pushState: 'error' }); this.toast('Push購読の作成に失敗しました') }
+    } catch { this.set({ pushState: 'error' }); this.toast('Push購読の作成に失敗しました') }
+  }
+
+  /** User action: turn closed-app notifications off and drop the subscription. */
+  async disablePush() {
+    ls.del('push')
+    const ep = this.pushEndpoint
+    if (this.conn?.open && ep) this.send({ t: 'push_unsubscribe', pcToken: this.pcToken, endpoint: ep })
+    try {
+      const reg = await navigator.serviceWorker?.getRegistration()
+      const sub = await reg?.pushManager.getSubscription()
+      if (sub) {
+        if (this.conn?.open && !ep) this.send({ t: 'push_unsubscribe', pcToken: this.pcToken, endpoint: sub.endpoint })
+        await sub.unsubscribe()
+      }
+    } catch {}
+    this.pushEndpoint = ''
+    this.set({ pushState: pushSupported() ? 'off' : 'unsupported', pushSynced: false })
+  }
+
+  /** Create (or reuse) the browser subscription for the phone's VAPID key and
+   *  hand it to the phone over the paired connection. Returns false when no
+   *  subscription could be produced (e.g. VAPID key not known yet). */
+  private async syncPushSubscription(): Promise<boolean> {
+    if (!pushSupported()) { this.set({ pushState: 'unsupported' }); return false }
+    if (ls.get('push') !== '1') {
+      this.set({ pushState: Notification.permission === 'denied' ? 'blocked' : 'off' })
+      return false
+    }
+    if (Notification.permission === 'denied') { this.set({ pushState: 'blocked' }); return false }
+    if (Notification.permission !== 'granted') { this.set({ pushState: 'off' }); return false }
+    this.set({ pushState: 'on' })
+    await this.drainOfflineQueue() // adopt a subscription rotated by the SW, if any
+    if (!this.vapid) return false
+    let sub: PushSubscription | null = null
+    try {
+      const reg = await navigator.serviceWorker.ready
+      sub = await reg.pushManager.getSubscription()
+      if (sub) {
+        const current = sub.options.applicationServerKey ? bufToB64Url(sub.options.applicationServerKey) : ''
+        if (current !== this.vapid) { await sub.unsubscribe(); sub = null }
+      }
+      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8Array(this.vapid) as BufferSource })
+    } catch { sub = null }
+    if (!sub) { if (this.conn?.open) this.set({ pushState: 'error' }); return false }
+    this.pushEndpoint = sub.endpoint
+    if (this.conn?.open) this.send({ t: 'push_subscribe', pcToken: this.pcToken, subscription: sub.toJSON() })
+    return true
+  }
+
+  /** Send replies/actions the SW queued while no live connection existed. */
+  private async drainOfflineQueue() {
+    const recs = await idbAll()
+    if (!recs.length) return
+    let sent = 0
+    for (const r of recs.sort((a, b) => (a.time || 0) - (b.time || 0))) {
+      if (r.kind === 'subscription') {
+        // The SW re-subscribed after pushsubscriptionchange: forward the new
+        // subscription exactly like a fresh one, once connected.
+        if (this.conn?.open && r.subscription) {
+          this.pushEndpoint = r.subscription.endpoint || this.pushEndpoint
+          this.send({ t: 'push_subscribe', pcToken: this.pcToken, subscription: r.subscription })
+          await idbDel(r.id)
+        }
+        continue
+      }
+      if (!this.conn?.open) continue
+      if (r.kind === 'reply' && r.key && r.text) this.send({ t: 'notif_reply', key: r.key, text: r.text })
+      else if (r.kind === 'action' && r.key) this.send({ t: 'notif_action', key: r.key, index: r.index | 0 })
+      else continue
+      await idbDel(r.id)
+      sent++
+    }
+    if (sent) this.toast(`送信待ちだった返信・操作 ${sent} 件を送信しました`)
+  }
+
+  /** A notification reply from the SW: send now, or queue it if offline. */
+  private relayReply(key: string, text: string) {
+    if (this.conn?.open) { this.send({ t: 'notif_reply', key, text }); this.toast('返信を送信しました') }
+    else { void idbAdd({ kind: 'reply', key, text, time: Date.now() }); this.toast('返信を保存しました（スマホに接続した時点で送信します）') }
+  }
 
   /** Send an SMS from the PC, showing it in the open conversation right away.
    *  The phone's follow-up history push replaces the optimistic entry. */
@@ -342,6 +550,7 @@ class Link {
       // LAN is strictly preferred: once it is live, ignore cloud hellos so the
       // connection never flaps back to the slower route.
       if (this.conn?.kind === 'lan' && c.kind === 'cloud') return
+      if (m.vapid) this.vapid = m.vapid
       const trusted: string[] = JSON.parse(ls.get('trusted') || '[]')
       if (m.token === this.state.secret || trusted.includes(m.token)) this.accept(c, m)
       else this.set({ pending: { name: m.name || 'Android', accept: () => this.accept(c, m), reject: () => { c.close(); this.set({ pending: undefined }) } } })
@@ -351,6 +560,11 @@ class Link {
     const s = this.state
     switch (m.t) {
       case 'info': this.set({ info: m.info }); this.learnLan(m.info?.lan); break
+      case 'push_state': {
+        if (m.subscribed) { if (m.endpoint) this.pushEndpoint = m.endpoint; this.set({ pushState: 'on', pushSynced: true }) }
+        else this.set({ pushSynced: false })
+        break
+      }
       case 'notifs': this.set({ notifs: m.items }); break
       case 'notif': {
         const n: Notif = m.item

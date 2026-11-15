@@ -79,6 +79,7 @@ class Features(private val ctx: Context) {
         return JSONObject().put("name", name).put("model", "${Build.MANUFACTURER} ${Build.MODEL}")
             .put("android", Build.VERSION.RELEASE).put("token", token).put("seed", seed ?: JSONObject.NULL)
             .put("lan", lanJson())
+            .put("vapid", runCatching { WebPushStore.vapidPublic(ctx) }.getOrNull() ?: JSONObject.NULL)
     }
 
     @SuppressLint("MissingPermission")

@@ -201,6 +201,12 @@ function Notifs() {
       <header className="pane-h"><h2>通知</h2>
         {perm === 'default' && <button className="btn tonal" onClick={() => Notification.requestPermission()}><Icon n="notifications_active" />ブラウザ通知を有効化</button>}
         {perm === 'denied' && <span className="muted small">ブラウザ通知がブロックされています（ブラウザの設定から許可してください）</span>}
+        {s.pushState === 'unsupported' && <span className="muted small">このブラウザは「閉じていても通知」（Web Push）に対応していません</span>}
+        {s.pushState === 'off' && perm !== 'denied' && <button className="btn tonal" onClick={() => link.enablePush()}><Icon n="notifications_paused" />アプリを閉じても通知を受け取る</button>}
+        {s.pushState === 'busy' && <button className="btn tonal" disabled>設定中…</button>}
+        {s.pushState === 'error' && <button className="btn tonal" onClick={() => link.enablePush()}><Icon n="refresh" />Push設定を再試行</button>}
+        {s.pushState === 'on' && <span className="muted small">閉じていても通知: 有効{s.pushSynced ? '（スマホに登録済み）' : '（スマホ接続時に登録します）'}</span>}
+        {s.pushState === 'on' && <button className="btn tonal" onClick={() => link.disablePush()}>Pushを無効化</button>}
         <button className="btn tonal" onClick={() => link.send({ t: 'notif_dismiss', key: '*' })}><Icon n="clear_all" />すべて消去</button></header>
       <div className="card list-card">{s.notifs.map((n) => <NotifRow key={n.key} n={n} autoReply={s.focusNotif === n.key} />)}{!s.notifs.length && <Empty icon="notifications_off" text="通知はありません（アプリで通知へのアクセスを許可してください）" />}</div>
     </div>
