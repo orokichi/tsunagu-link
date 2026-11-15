@@ -147,24 +147,78 @@ class Features(private val ctx: Context) {
         }
     }
 
-    // ---------- SMS ----------
+    // ---------- SMS / MMS / RCS ----------
+    // content://sms holds plain SMS only. MMS and RCS messages live in content://mms,
+    // so both providers must be merged or those conversations lose most of their history.
+    private fun mmsText(mid: Long): String {
+        val texts = ArrayList<String>()
+        var hasMedia = false
+        runCatching {
+            cr.query(Uri.parse("content://mms/part"), arrayOf("ct", "text"), "mid=?", arrayOf(mid.toString()), "seq ASC")?.use { c ->
+                while (c.moveToNext()) {
+                    val ct = c.getString(0) ?: ""
+                    if (ct == "text/plain") c.getString(1)?.takeIf { it.isNotBlank() }?.let { t -> texts.add(t) }
+                    else if (ct != "application/smil") hasMedia = true
+                }
+            }
+        }
+        return when {
+            texts.isNotEmpty() -> texts.joinToString("\n")
+            hasMedia -> "（添付ファイル）"
+            else -> ""
+        }
+    }
+    private fun mmsAddress(mid: Long, outgoing: Boolean): String {
+        // addr types (PduHeaders): FROM = 137, TO = 151
+        var fallback = ""
+        runCatching {
+            cr.query(Uri.parse("content://mms/$mid/addr"), arrayOf("address", "type"), null, null, null)?.use { c ->
+                while (c.moveToNext()) {
+                    val a = c.getString(0) ?: continue
+                    if (a == "insert-address-token") continue
+                    if (fallback.isEmpty()) fallback = a
+                    val type = c.getInt(1)
+                    if (!outgoing && type == 137) return a
+                    if (outgoing && type == 151) return a
+                }
+            }
+        }
+        return fallback
+    }
     fun threads(): JSONArray {
-        val arr = JSONArray()
-        if (!has(Manifest.permission.READ_SMS)) return arr
-        val seen = HashSet<Long>()
+        val byId = LinkedHashMap<Long, JSONObject>()
+        if (!has(Manifest.permission.READ_SMS)) return JSONArray()
         runCatching {
             cr.query(Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.READ),
                 null, null, "${Telephony.Sms.DATE} DESC")?.use { c ->
                 var scanned = 0
-                while (c.moveToNext() && scanned++ < 3000 && arr.length() < 60) {
+                while (c.moveToNext() && scanned++ < 3000) {
                     val tid = c.getLong(0)
-                    if (!seen.add(tid)) continue
+                    if (byId.containsKey(tid)) continue
                     val addr = c.getString(1) ?: ""
-                    arr.put(JSONObject().put("id", tid.toString()).put("address", addr).put("name", contactName(addr) ?: JSONObject.NULL)
-                        .put("snippet", c.getString(2) ?: "").put("time", c.getLong(3)).put("unread", c.getInt(4) == 0))
+                    byId[tid] = JSONObject().put("id", tid.toString()).put("address", addr).put("name", contactName(addr) ?: JSONObject.NULL)
+                        .put("snippet", c.getString(2) ?: "").put("time", c.getLong(3)).put("unread", c.getInt(4) == 0)
                 }
             }
         }
+        // Merge MMS/RCS: threads made only of those never show up in content://sms at all,
+        // and for mixed threads the newest message may be an MMS/RCS one.
+        runCatching {
+            cr.query(Telephony.Mms.CONTENT_URI, arrayOf(Telephony.Mms.THREAD_ID, Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.READ, Telephony.Mms.MESSAGE_BOX),
+                null, null, "${Telephony.Mms.DATE} DESC")?.use { c ->
+                var scanned = 0
+                while (c.moveToNext() && scanned++ < 1500) {
+                    val tid = c.getLong(0); val mid = c.getLong(1); val time = c.getLong(2) * 1000
+                    val cur = byId[tid]
+                    if (cur != null && cur.getLong("time") >= time) continue
+                    val addr = if (cur != null) cur.getString("address") else mmsAddress(mid, c.getInt(4) != Telephony.Mms.MESSAGE_BOX_INBOX)
+                    byId[tid] = JSONObject().put("id", tid.toString()).put("address", addr).put("name", contactName(addr) ?: JSONObject.NULL)
+                        .put("snippet", mmsText(mid)).put("time", time).put("unread", c.getInt(3) == 0)
+                }
+            }
+        }
+        val arr = JSONArray()
+        byId.values.sortedByDescending { it.getLong("time") }.take(60).forEach { arr.put(it) }
         return arr
     }
     fun sms(threadId: String): JSONArray {
@@ -173,13 +227,24 @@ class Features(private val ctx: Context) {
         runCatching {
             cr.query(Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms._ID, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE),
                 "${Telephony.Sms.THREAD_ID}=?", arrayOf(threadId), "${Telephony.Sms.DATE} DESC")?.use { c ->
-                while (c.moveToNext() && list.size < 150) {
+                while (c.moveToNext() && list.size < 1000) {
                     list.add(JSONObject().put("id", c.getString(0)).put("body", c.getString(1) ?: "").put("time", c.getLong(2))
                         .put("mine", c.getInt(3) != Telephony.Sms.MESSAGE_TYPE_INBOX))
                 }
             }
         }
-        return JSONArray(list.reversed())
+        runCatching {
+            cr.query(Telephony.Mms.CONTENT_URI, arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.MESSAGE_BOX),
+                "${Telephony.Mms.THREAD_ID}=?", arrayOf(threadId), "${Telephony.Mms.DATE} DESC")?.use { c ->
+                while (c.moveToNext() && list.size < 2000) {
+                    val mid = c.getLong(0)
+                    list.add(JSONObject().put("id", "m$mid").put("body", mmsText(mid)).put("time", c.getLong(1) * 1000)
+                        .put("mine", c.getInt(2) != Telephony.Mms.MESSAGE_BOX_INBOX))
+                }
+            }
+        }
+        list.sortBy { it.getLong("time") }
+        return JSONArray(list.takeLast(150))
     }
     fun threadIdFor(address: String): String? = runCatching { Telephony.Threads.getOrCreateThreadId(ctx, address).toString() }.getOrNull()
     fun sendSms(to: String, body: String): Boolean {
@@ -218,7 +283,11 @@ class Features(private val ctx: Context) {
     // ---------- photos & videos ----------
     fun photos(offset: Int, limit: Int): Pair<JSONArray, Boolean> {
         val arr = JSONArray()
-        val canImg = has(Manifest.permission.READ_MEDIA_IMAGES); val canVid = has(Manifest.permission.READ_MEDIA_VIDEO)
+        // Android 14+: with "selected photos" (partial) access, READ_MEDIA_IMAGES/VIDEO stay
+        // denied and READ_MEDIA_VISUAL_USER_SELECTED is granted instead — the selected items
+        // are still readable, so treat it as access or nothing ever shows up on the PC.
+        val partial = Build.VERSION.SDK_INT >= 34 && has(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+        val canImg = has(Manifest.permission.READ_MEDIA_IMAGES) || partial; val canVid = has(Manifest.permission.READ_MEDIA_VIDEO) || partial
         if (!canImg && !canVid) return arr to false
         val types = listOfNotNull(if (canImg) MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE else null, if (canVid) MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO else null)
         val args = Bundle().apply {

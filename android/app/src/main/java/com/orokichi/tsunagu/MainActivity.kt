@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
@@ -171,7 +172,7 @@ val PERMS = listOf(
     Perm(Icons.Rounded.Sms, "メッセージ (SMS)", "SMS の閲覧・PC からの送信・受信通知", listOf(Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS, Manifest.permission.RECEIVE_SMS)),
     Perm(Icons.Rounded.Call, "通話", "通話履歴・PC から発信・着信通知・拒否", listOf(Manifest.permission.READ_CALL_LOG, Manifest.permission.READ_PHONE_STATE, Manifest.permission.CALL_PHONE, Manifest.permission.ANSWER_PHONE_CALLS)),
     Perm(Icons.Rounded.Contacts, "連絡先", "番号に名前を表示", listOf(Manifest.permission.READ_CONTACTS)),
-    Perm(Icons.Rounded.PhotoLibrary, "写真と動画", "最近の写真・動画を PC で閲覧・保存", listOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)),
+    Perm(Icons.Rounded.PhotoLibrary, "写真と動画", "最近の写真・動画を PC で閲覧・保存", listOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO), special = "media"),
     Perm(Icons.Rounded.NotificationsActive, "アプリの通知", "受信ファイル・リンク・鳴らす機能の通知", listOf(Manifest.permission.POST_NOTIFICATIONS)),
     Perm(Icons.Rounded.BatterySaver, "バックグラウンドで常時接続", "電池の最適化を除外して接続を維持", special = "battery"),
     Perm(Icons.Rounded.OpenInNew, "リンクを直接開く", "PC から送ったリンクを即座に開く（他のアプリの上に表示）", special = "overlay"),
@@ -181,6 +182,10 @@ fun granted(ctx: Context, p: Perm): Boolean = when (p.special) {
     "listener" -> NotifListener.enabled(ctx)
     "battery" -> ctx.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
     "overlay" -> Settings.canDrawOverlays(ctx)
+    // Partial ("selected photos") access counts: the chosen photos/videos are usable.
+    "media" -> (ctx.checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED &&
+        ctx.checkSelfPermission(Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED) ||
+        (Build.VERSION.SDK_INT >= 34 && ctx.checkSelfPermission(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) == PackageManager.PERMISSION_GRANTED)
     else -> p.perms.all { ctx.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
 }
 
@@ -258,7 +263,7 @@ fun HomeScreen(onUnpair: () -> Unit) {
 
             // Permissions
             val states = remember(tick) { PERMS.map { granted(ctx, it) } }
-            val missing = PERMS.filterIndexed { i, p -> !states[i] && p.special == null }.flatMap { it.perms }
+            val missing = PERMS.filterIndexed { i, p -> !states[i] && (p.special == null || p.special == "media") }.flatMap { it.perms }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp, start = 4.dp)) {
                 Text("連携する機能", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 if (missing.isNotEmpty()) Button(onClick = { req.launch(missing.toTypedArray()) }, shapes = ButtonDefaults.shapes()) { Text("まとめて許可") }
@@ -313,6 +318,8 @@ fun grant(ctx: Context, p: Perm, request: (Array<String>) -> Unit) {
         "listener" -> ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
         "battery" -> ctx.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${ctx.packageName}")))
         "overlay" -> ctx.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${ctx.packageName}")))
+        // Re-requesting lets the user widen a partial ("selected photos") grant or allow all.
+        "media" -> request(p.perms.toTypedArray())
         else -> request(p.perms.toTypedArray())
     }
 }
