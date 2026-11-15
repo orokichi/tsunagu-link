@@ -246,6 +246,27 @@ main > * { animation: enter .55s var(--spring-soft); }
 .clip-compose textarea { flex: 1; border: 0; outline: 0; resize: vertical; background: var(--md-surface-container-high); border-radius: 20px; padding: 14px 18px; }
 .clip p { white-space: pre-wrap; }
 
+/* ---- unread (messages) ---- */
+.unread-badge { flex: none; background: var(--md-primary); color: var(--md-on-primary); font-size: 11px; font-weight: 700; min-width: 20px; height: 20px; border-radius: 10px; display: grid; place-items: center; padding: 0 6px; }
+.thread.unread .body b { font-weight: 800; }
+.thread.unread .body p { color: var(--md-on-surface); font-weight: 600; }
+
+/* ---- explorer & find ---- */
+.warn-card { display: flex; gap: 14px; align-items: center; background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); border-radius: var(--r-l); padding: 16px 20px; }
+.warn-card .ms { font-size: 28px; flex: none; }
+.warn-card > div { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.crumbs { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; padding: 0 4px; }
+.crumb-wrap { display: inline-flex; align-items: center; gap: 2px; }
+.crumb { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; cursor: pointer; font-weight: 650; font-size: 14px; padding: 8px 12px; border-radius: 14px; transition: background .2s, border-radius .4s var(--spring); }
+.crumb:hover { background: var(--md-surface-container-high); border-radius: 20px; }
+.crumb .ms { font-size: 19px; }
+.crumb-sep { font-size: 18px; color: var(--md-on-surface-variant); }
+.fs-row { cursor: default; align-items: center; }
+.fs-row .avatar.folder { background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); }
+.find-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.find-meta .btn { margin-left: auto; }
+.map-frame { width: 100%; height: 440px; border: 0; border-radius: var(--r-xl); background: var(--md-surface-container-high); }
+
 /* ---- banners & toasts ---- */
 .call-banner { display: flex; align-items: center; gap: 16px; background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); border-radius: 32px; padding: 14px 18px; margin-bottom: 12px; }
 .call-banner > div:nth-child(2) { flex: 1; }

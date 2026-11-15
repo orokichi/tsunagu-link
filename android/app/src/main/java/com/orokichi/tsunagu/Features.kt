@@ -12,6 +12,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationManager
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.MediaMetadata
@@ -39,8 +41,11 @@ import android.telecom.TelecomManager
 import android.telephony.SmsManager
 import android.telephony.TelephonyManager
 import android.util.Size
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.coroutines.resume
 
 class Features(private val ctx: Context) {
     private val cr = ctx.contentResolver
@@ -217,6 +222,7 @@ class Features(private val ctx: Context) {
     }
     fun threads(): JSONArray {
         val byId = LinkedHashMap<Long, JSONObject>()
+        val unreadCounts = HashMap<Long, Int>()
         if (!has(Manifest.permission.READ_SMS)) return JSONArray()
         runCatching {
             cr.query(Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.READ),
@@ -224,6 +230,7 @@ class Features(private val ctx: Context) {
                 var scanned = 0
                 while (c.moveToNext() && scanned++ < 3000) {
                     val tid = c.getLong(0)
+                    if (c.getInt(4) == 0) unreadCounts[tid] = (unreadCounts[tid] ?: 0) + 1
                     if (byId.containsKey(tid)) continue
                     val addr = c.getString(1) ?: ""
                     byId[tid] = JSONObject().put("id", tid.toString()).put("address", addr).put("name", contactName(addr) ?: JSONObject.NULL)
@@ -240,6 +247,7 @@ class Features(private val ctx: Context) {
                 val kindChecked = HashSet<Long>()
                 while (c.moveToNext() && scanned++ < 1500) {
                     val tid = c.getLong(0); val mid = c.getLong(1); val time = c.getLong(2) * 1000
+                    if (c.getInt(3) == 0) unreadCounts[tid] = (unreadCounts[tid] ?: 0) + 1
                     val cur = byId[tid]
                     val isNewest = cur == null || cur.getLong("time") < time
                     // The newest MMS-provider entry per thread also decides its kind
@@ -283,9 +291,33 @@ class Features(private val ctx: Context) {
                 }
             }
         }
+        // Authoritative unread state comes from the providers' READ flags.
+        for ((tid, o) in byId) {
+            val n = unreadCounts[tid] ?: 0
+            o.put("unreadCount", n); o.put("unread", n > 0)
+        }
         val arr = JSONArray()
         byId.values.sortedByDescending { it.getLong("time") }.take(60).forEach { arr.put(it) }
         return arr
+    }
+
+    /** Marks every unread SMS/MMS in a thread as read in the providers and
+     *  returns how many rows were actually updated. Android only honours
+     *  provider writes from the default SMS app (plus some OEM builds), so on
+     *  most devices this updates 0 rows and the stock messaging app keeps its
+     *  unread state; callers must not fake success. */
+    fun markRead(threadId: String): Int {
+        if (threadId.startsWith("local:") || !has(Manifest.permission.READ_SMS)) return 0
+        var n = 0
+        runCatching {
+            val cv = ContentValues().apply { put(Telephony.Sms.READ, 1); put(Telephony.Sms.SEEN, 1) }
+            n += cr.update(Telephony.Sms.CONTENT_URI, cv, "${Telephony.Sms.THREAD_ID}=? AND ${Telephony.Sms.READ}=0", arrayOf(threadId))
+        }
+        runCatching {
+            val cv = ContentValues().apply { put(Telephony.Mms.READ, 1) }
+            n += cr.update(Telephony.Mms.CONTENT_URI, cv, "${Telephony.Mms.THREAD_ID}=? AND ${Telephony.Mms.READ}=0", arrayOf(threadId))
+        }
+        return n
     }
     fun sms(threadId: String): JSONArray {
         // Synthetic thread that exists only in the local sent log.
@@ -293,29 +325,29 @@ class Features(private val ctx: Context) {
             val addr = threadId.removePrefix("local:")
             val out = JSONArray()
             SentLog.all(ctx).filter { SentLog.sameNumber(it.address, addr) }.sortedBy { it.time }.takeLast(150).forEach { e ->
-                out.put(JSONObject().put("id", "s${e.time}").put("body", e.body).put("time", e.time).put("mine", true).put("kind", "sms"))
+                out.put(JSONObject().put("id", "s${e.time}").put("body", e.body).put("time", e.time).put("mine", true).put("kind", "sms").put("read", true))
             }
             return out
         }
         val list = ArrayList<JSONObject>()
         if (!has(Manifest.permission.READ_SMS)) return JSONArray()
         runCatching {
-            cr.query(Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms._ID, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE),
+            cr.query(Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms._ID, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE, Telephony.Sms.READ),
                 "${Telephony.Sms.THREAD_ID}=?", arrayOf(threadId), "${Telephony.Sms.DATE} DESC")?.use { c ->
                 while (c.moveToNext() && list.size < 1000) {
                     list.add(JSONObject().put("id", c.getString(0)).put("body", c.getString(1) ?: "").put("time", c.getLong(2))
-                        .put("mine", c.getInt(3) != Telephony.Sms.MESSAGE_TYPE_INBOX).put("kind", "sms"))
+                        .put("mine", c.getInt(3) != Telephony.Sms.MESSAGE_TYPE_INBOX).put("kind", "sms").put("read", c.getInt(4) != 0))
                 }
             }
         }
         runCatching {
-            cr.query(Telephony.Mms.CONTENT_URI, arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.MESSAGE_BOX),
+            cr.query(Telephony.Mms.CONTENT_URI, arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.MESSAGE_BOX, Telephony.Mms.READ),
                 "${Telephony.Mms.THREAD_ID}=?", arrayOf(threadId), "${Telephony.Mms.DATE} DESC")?.use { c ->
                 while (c.moveToNext() && list.size < 2000) {
                     val mid = c.getLong(0)
                     val (body, media) = mmsInfo(mid)
                     list.add(JSONObject().put("id", "m$mid").put("body", body).put("time", c.getLong(1) * 1000)
-                        .put("mine", c.getInt(2) != Telephony.Mms.MESSAGE_BOX_INBOX).put("kind", mmsKind(media)))
+                        .put("mine", c.getInt(2) != Telephony.Mms.MESSAGE_BOX_INBOX).put("kind", mmsKind(media)).put("read", c.getInt(3) != 0))
                 }
             }
         }
@@ -328,7 +360,7 @@ class Features(private val ctx: Context) {
                 for (e in SentLog.all(ctx)) {
                     if (!SentLog.sameNumber(e.address, addr)) continue
                     val dup = list.any { it.getBoolean("mine") && it.getString("body") == e.body && kotlin.math.abs(it.getLong("time") - e.time) <= 120_000 }
-                    if (!dup) list.add(JSONObject().put("id", "s${e.time}").put("body", e.body).put("time", e.time).put("mine", true).put("kind", "sms"))
+                    if (!dup) list.add(JSONObject().put("id", "s${e.time}").put("body", e.body).put("time", e.time).put("mine", true).put("kind", "sms").put("read", true))
                 }
             }
         }
@@ -437,6 +469,46 @@ class Features(private val ctx: Context) {
     }
     private fun itemUri(id: Long, video: Boolean) = ContentUris.withAppendedId(if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
     fun photoUri(key: String): Uri? = key.drop(1).toLongOrNull()?.let { itemUri(it, key.startsWith("v")) }
+
+    // ---------- location （探す） ----------
+    /** Current position for the PC "探す" screen. Uses a fresh last-known fix
+     *  when available, otherwise requests one current fix (9s timeout) and
+     *  falls back to the stale last-known fix. Errors are explicit:
+     *  "permission" (no location permission) / "unavailable" (no fix). */
+    @SuppressLint("MissingPermission")
+    suspend fun location(): JSONObject {
+        val fine = has(Manifest.permission.ACCESS_FINE_LOCATION)
+        val coarse = has(Manifest.permission.ACCESS_COARSE_LOCATION)
+        if (!fine && !coarse) return JSONObject().put("error", "permission")
+        val lm = ctx.getSystemService(LocationManager::class.java)
+        var best: Location? = null
+        runCatching {
+            for (p in lm.getProviders(true)) {
+                val l = runCatching { lm.getLastKnownLocation(p) }.getOrNull() ?: continue
+                val cur = best
+                if (cur == null || l.time > cur.time) best = l
+            }
+        }
+        val b = best
+        if (b != null && System.currentTimeMillis() - b.time < 60_000) return locJson(b)
+        val fresh = runCatching { withTimeoutOrNull(9_000) { currentFix(lm, fine) } }.getOrNull()
+        val use = fresh ?: b
+        return if (use != null) locJson(use) else JSONObject().put("error", "unavailable")
+    }
+    private fun locJson(l: Location) = JSONObject().put("lat", l.latitude).put("lng", l.longitude)
+        .put("acc", if (l.hasAccuracy()) l.accuracy.toDouble() else JSONObject.NULL).put("time", l.time)
+    @SuppressLint("MissingPermission")
+    private suspend fun currentFix(lm: LocationManager, fine: Boolean): Location? = suspendCancellableCoroutine { cont ->
+        val provider = when {
+            fine && runCatching { lm.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false) -> LocationManager.GPS_PROVIDER
+            runCatching { lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false) -> LocationManager.NETWORK_PROVIDER
+            else -> null
+        }
+        if (provider == null) { cont.resume(null); return@suspendCancellableCoroutine }
+        runCatching {
+            lm.getCurrentLocation(provider, null, ctx.mainExecutor) { loc -> if (cont.isActive) cont.resume(loc) }
+        }.onFailure { if (cont.isActive) cont.resume(null) }
+    }
 
     // ---------- links ----------
     fun openUrl(url: String) {

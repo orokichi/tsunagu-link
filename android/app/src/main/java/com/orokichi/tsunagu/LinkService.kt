@@ -88,6 +88,11 @@ class LinkService : Service() {
     @Volatile private var lanLatch: java.util.concurrent.CountDownLatch? = null
     private val lanBusy = java.util.concurrent.atomic.AtomicBoolean(false)
     private var ringer: Ringer? = null
+    private var vibrator: android.os.Vibrator? = null
+    private val vibStop = Runnable { stopVibrate() }
+    // ---- Explorer uploads (PC -> a chosen folder on the phone) ----
+    private class FsUp(val dir: String, val file: java.io.File, val out: OutputStream, val size: Long) { var done: Long = 0 }
+    private val fsUploads = HashMap<String, FsUp>()
     private val net = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             main.post { js("B.kick()") }
@@ -119,6 +124,9 @@ class LinkService : Service() {
         smsPushJob = scope.launch {
             delay(700) // bursts of provider writes collapse into one push
             if (!connected()) return@launch
+            // The conversation the PC is looking at counts as read: keep the
+            // providers' READ flags in step so its unread badge clears too.
+            watchedThread?.let { runCatching { features.markRead(it) } }
             send(msg("threads", "items" to features.threads()))
             watchedThread?.let { send(msg("sms", "threadId" to it, "items" to features.sms(it))) }
         }
@@ -190,6 +198,7 @@ class LinkService : Service() {
         lanServer?.stop(); lanServer = null; lanPort = 0
         activeVia = null; _via.value = ""
         ringer?.stop()
+        stopVibrate()
         js("B.stop()")
         web?.destroy(); web = null
         scope.cancel()
@@ -203,7 +212,10 @@ class LinkService : Service() {
         @JavascriptInterface fun onStatus(s: String) { main.post { if (activeVia != "lan") setStatus(s) } }
         @JavascriptInterface fun onMessage(json: String, via: String) {
             val m = runCatching { JSONObject(json) }.getOrNull() ?: return
-            if (m.optString("t").startsWith("file_")) fileQueue.trySend(m to via) else scope.launch { handle(m, via) }
+            val t = m.optString("t")
+            // File transfers (both directions, incl. explorer uploads) must stay
+            // strictly ordered, so they go through the serial file queue.
+            if (t.startsWith("file_") || t.startsWith("fs_put")) fileQueue.trySend(m to via) else scope.launch { handle(m, via) }
         }
         @JavascriptInterface fun onLanStatus(s: String) {
             main.post {
@@ -307,7 +319,61 @@ class LinkService : Service() {
                     val (items, more) = features.photos(off, 48)
                     send(msg("photos", "items" to items, "offset" to off, "hasMore" to more))
                 }
+                "location" -> {
+                    val loc = features.location()
+                    val o = msg("location")
+                    loc.keys().forEach { k -> o.put(k, loc.get(k)) }
+                    send(o)
+                }
+                "fs" -> sendFsList(m.optString("path"))
             }
+            "mark_read" -> {
+                val tid = m.optString("threadId")
+                if (tid.isNotEmpty()) {
+                    runCatching { features.markRead(tid) }
+                    send(msg("threads", "items" to features.threads()))
+                    send(msg("sms", "threadId" to tid, "items" to features.sms(tid)))
+                }
+            }
+            "watch" -> watchedThread = m.optString("threadId").ifEmpty { null }
+            "vibrate" -> withContext(Dispatchers.Main) {
+                if (m.optBoolean("on", true)) startVibrate() else stopVibrate()
+            }
+            "fs_get" -> Explorer.resolve(m.optString("path"))?.takeIf { it.isFile }?.let { sendFile(it) }
+            "fs_delete" -> {
+                val path = m.optString("path")
+                val ok = Explorer.delete(path)
+                toast(if (ok) "削除しました" else "削除できませんでした")
+                sendFsList(parentOf(path))
+            }
+            "fs_rename" -> {
+                val path = m.optString("path")
+                val ok = Explorer.rename(path, m.optString("name"))
+                toast(if (ok) "名前を変更しました" else "名前を変更できませんでした")
+                sendFsList(parentOf(path))
+            }
+            "fs_mkdir" -> {
+                val dir = m.optString("path")
+                val ok = Explorer.mkdir(dir, m.optString("name"))
+                toast(if (ok) "フォルダを作成しました" else "フォルダを作成できませんでした")
+                sendFsList(dir)
+            }
+            "fs_perm" -> withContext(Dispatchers.Main) {
+                val opened = runCatching {
+                    startActivity(Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:$packageName")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); true
+                }.getOrElse {
+                    runCatching { startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); true }.getOrDefault(false)
+                }
+                toast(if (opened) "スマホで「すべてのファイルへのアクセス」を許可してください" else "設定画面を開けませんでした")
+            }
+            "fs_put_start" -> startFsUpload(m)
+            "fs_put_chunk" -> fsUploads[m.optString("id")]?.let { up ->
+                val bytes = Base64.decode(m.optString("d"), Base64.NO_WRAP)
+                withContext(Dispatchers.IO) { up.out.write(bytes) }
+                up.done += bytes.size
+            }
+            "fs_put_end" -> finishFsUpload(m.optString("id"))
             "notif_dismiss" -> NotifListener.instance?.dismiss(m.optString("key"))
             "notif_reply" -> NotifListener.instance?.reply(m.optString("key"), m.optString("text"))?.let { ok -> toast(if (ok) "返信しました" else "返信できませんでした") }
             "notif_action" -> NotifListener.instance?.action(m.optString("key"), m.optInt("index"))
@@ -327,7 +393,7 @@ class LinkService : Service() {
                 withContext(Dispatchers.Main) { getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Tsunagu", t)) }
             }
             "ring" -> withContext(Dispatchers.Main) {
-                if (m.optBoolean("on", true)) { ringer?.stop(); ringer = Ringer(this@LinkService).also { it.start() }; toast("スマホを鳴らしています") } else ringer?.stop()
+                if (m.optBoolean("on", true)) { stopVibrate(); ringer?.stop(); ringer = Ringer(this@LinkService).also { it.start() }; toast("スマホを鳴らしています") } else { ringer?.stop(); stopVibrate() }
             }
             "open_url" -> features.openUrl(m.optString("url"))
             "photo_get" -> features.photoUri(m.optString("id"))?.let { sendUri(it) }
@@ -411,12 +477,22 @@ class LinkService : Service() {
             }
         }
         val mime = contentResolver.getType(uri) ?: "application/octet-stream"
+        sendStream(name, size, mime) { contentResolver.openInputStream(uri) }
+    }
+
+    /** Explorer download: stream a storage file to the PC (same chunk protocol). */
+    suspend fun sendFile(f: java.io.File) = withContext(Dispatchers.IO) {
+        if (!connected()) return@withContext
+        sendStream(f.name, f.length(), Explorer.mimeOf(f)) { java.io.FileInputStream(f) }
+    }
+
+    private suspend fun sendStream(name: String, size: Long, mime: String, open: () -> java.io.InputStream?) {
         val id = java.util.UUID.randomUUID().toString().take(12)
         var t = Transfer(id, name, size, 0, false, "active")
         updateTransfer(t)
-        if (!sendAwait(msg("file_start", "id" to id, "name" to name, "size" to size, "mime" to mime))) { updateTransfer(t.copy(state = "error")); return@withContext }
+        if (!sendAwait(msg("file_start", "id" to id, "name" to name, "size" to size, "mime" to mime))) { updateTransfer(t.copy(state = "error")); return }
         val ok = runCatching {
-            contentResolver.openInputStream(uri)!!.use { input ->
+            open()!!.use { input ->
                 val buf = ByteArray(48 * 1024); var n: Int; var i = 0
                 while (input.read(buf).also { n = it } > 0) {
                     val chunk = Base64.encodeToString(buf, 0, n, Base64.NO_WRAP)
@@ -428,6 +504,58 @@ class LinkService : Service() {
             sendAwait(msg("file_end", "id" to id))
         }.getOrDefault(false)
         updateTransfer(t.copy(done = if (ok) size else t.done, state = if (ok) "done" else "error"))
+    }
+
+    // ---------------- Vibrate ----------------
+    private fun startVibrate() {
+        stopVibrate()
+        val vm = getSystemService(android.os.VibratorManager::class.java) ?: return
+        val v = vm.defaultVibrator
+        if (!v.hasVibrator()) { toast("この端末では振動できません"); return }
+        vibrator = v
+        // Ring-like buzz pattern, looped until the cap below stops it.
+        runCatching { v.vibrate(android.os.VibrationEffect.createWaveform(longArrayOf(0, 500, 250, 500, 250, 500, 250, 900), 0)) }
+        main.postDelayed(vibStop, 20_000)
+        toast("スマホを振動させています")
+    }
+    private fun stopVibrate() {
+        main.removeCallbacks(vibStop)
+        runCatching { vibrator?.cancel() }
+        vibrator = null
+    }
+
+    // ---------------- Explorer ----------------
+    private fun sendFsList(rel: String) {
+        val l = Explorer.list(rel)
+        val o = msg("fs_list", "path" to l.optString("path"), "access" to l.optBoolean("access"),
+            "items" to (l.optJSONArray("items") ?: JSONArray()))
+        if (l.has("error")) o.put("error", l.optString("error"))
+        send(o)
+    }
+    private fun parentOf(path: String) = path.substringBeforeLast('/', "")
+
+    private suspend fun startFsUpload(m: JSONObject) = withContext(Dispatchers.IO) {
+        val id = m.optString("id")
+        val dir = m.optString("dir")
+        val target = Explorer.uploadTarget(dir, m.optString("name", "file"))
+        if (target == null) { toast("アップロード先が不正です"); return@withContext }
+        runCatching {
+            target.parentFile?.mkdirs()
+            fsUploads[id] = FsUp(dir, target, target.outputStream().buffered(256 * 1024), m.optLong("size"))
+        }.onFailure { toast("アップロードを開始できませんでした") }
+    }
+
+    private suspend fun finishFsUpload(id: String) = withContext(Dispatchers.IO) {
+        val up = fsUploads.remove(id) ?: return@withContext
+        runCatching { up.out.flush(); up.out.close() }
+        // Same rule as regular transfers: never keep a truncated file.
+        if (up.size > 0 && up.done != up.size) {
+            runCatching { up.file.delete() }
+            toast("ファイルが不完全なため保存しませんでした: ${up.file.name}")
+        } else {
+            toast("スマホに保存しました: ${up.file.name}")
+        }
+        sendFsList(up.dir)
     }
 
     // ---------------- Notification ----------------

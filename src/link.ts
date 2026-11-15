@@ -7,8 +7,10 @@ export interface Info { battery: number; charging: boolean; net: string; carrier
 export interface LanEps { ips: string[]; port: number }
 export interface Notif { key: string; app: string; pkg: string; title: string; text: string; time: number; icon?: string; reply?: boolean; actions?: string[] }
 export interface Media { app: string; title: string; artist: string; playing: boolean; art?: string; position?: number; duration?: number }
-export interface Thread { id: string; address: string; name?: string; snippet: string; time: number; unread?: boolean; kind?: 'sms' | 'rcs' | 'mms' }
-export interface Sms { id: string; body: string; time: number; mine: boolean; kind?: 'sms' | 'rcs' | 'mms' }
+export interface Thread { id: string; address: string; name?: string; snippet: string; time: number; unread?: boolean; unreadCount?: number; kind?: 'sms' | 'rcs' | 'mms' }
+export interface Sms { id: string; body: string; time: number; mine: boolean; kind?: 'sms' | 'rcs' | 'mms'; read?: boolean }
+export interface FsItem { name: string; dir: boolean; size: number; time: number }
+export interface LocFix { lat: number; lng: number; acc?: number | null; time: number }
 export interface Call { number: string; name?: string; type: number; time: number; duration: number }
 export interface Photo { id: string; video: boolean; time: number; thumb: string; duration?: number; name: string; size: number }
 export interface Transfer { id: string; name: string; size: number; mime: string; done: number; dir: 'in' | 'out'; state: 'active' | 'done' | 'error'; url?: string }
@@ -22,6 +24,8 @@ export interface State {
   threads: Thread[]; sms: Record<string, Sms[]>
   calls: Call[]; photos: Photo[]; photosMore: boolean
   transfers: Transfer[]; clips: Clip[]; toasts: Toast[]
+  fsPath: string; fsItems: FsItem[]; fsAccess: boolean; fsReady: boolean
+  loc?: LocFix | null; locError?: string; locBusy: boolean
   pending?: { name: string; accept: () => void; reject: () => void }
   incomingCall?: { number: string; name?: string } | null
   focusNotif?: string
@@ -35,7 +39,7 @@ const ls = {
   del: (k: string) => localStorage.removeItem('ts.' + k),
 }
 const CHUNK = 48 * 1024
-export const APP_VERSION = '1.0.4'
+export const APP_VERSION = '1.0.5'
 
 function b64(buf: ArrayBuffer) {
   const u = new Uint8Array(buf); let s = ''
@@ -161,7 +165,7 @@ class Link {
     if (!code) { code = rand(6); ls.set('code', code) }
     if (!secret) { secret = rand(20); ls.set('secret', secret) }
     const focusNotif = new URLSearchParams(location.search).get('notif') || undefined
-    this.state = { status: 'starting', code, secret, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif }
+    this.state = { status: 'starting', code, secret, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false }
     this.start()
     // If we already know the phone's LAN endpoints (learned during a previous
     // pairing), try the direct route right away; keep retrying while offline
@@ -377,6 +381,12 @@ class Link {
         break
       }
       case 'photos': this.set({ photos: m.offset ? [...s.photos, ...m.items] : m.items, photosMore: m.hasMore }); break
+      case 'fs_list': this.set({ fsPath: m.path || '', fsItems: m.items || [], fsAccess: !!m.access, fsReady: true }); break
+      case 'location': {
+        if (m.error) this.set({ locError: m.error, locBusy: false })
+        else this.set({ loc: { lat: m.lat, lng: m.lng, acc: m.acc ?? null, time: m.time }, locError: undefined, locBusy: false })
+        break
+      }
       case 'toast': this.toast(m.text); break
       case 'file_start': {
         const t: Transfer = { id: m.id, name: m.name, size: m.size, mime: m.mime || 'application/octet-stream', done: 0, dir: 'in', state: 'active' }
@@ -449,7 +459,46 @@ class Link {
   }
 
   getPhotos(reset: boolean) { this.send({ t: 'get', what: 'photos', offset: reset ? 0 : this.state.photos.length }) }
-  openThread(id: string) { this.send({ t: 'get', what: 'sms', threadId: id }) }
+  openThread(id: string) {
+    this.send({ t: 'get', what: 'sms', threadId: id })
+    // Opening a conversation marks it read on the phone too (the phone updates
+    // the providers' READ flags where Android allows it and pushes the result).
+    this.send({ t: 'mark_read', threadId: id })
+    // Optimistically clear the badge; the phone's next threads push is authoritative.
+    this.set({ threads: this.state.threads.map((t) => (t.id === id ? { ...t, unread: false, unreadCount: 0 } : t)) })
+  }
+  clearWatch() { this.send({ t: 'watch', threadId: '' }) }
+
+  // ---------------- Explorer ----------------
+  fsList(path: string) { this.send({ t: 'get', what: 'fs', path }) }
+  fsDownload(path: string) { this.send({ t: 'fs_get', path }); this.toast('PC に転送しています…') }
+  fsDelete(path: string) { this.send({ t: 'fs_delete', path }) }
+  fsRename(path: string, name: string) { this.send({ t: 'fs_rename', path, name }) }
+  fsMkdir(path: string, name: string) { this.send({ t: 'fs_mkdir', path, name }) }
+  fsPerm() { this.send({ t: 'fs_perm' }) }
+  async fsUpload(files: FileList | File[], dir: string) {
+    if (!this.conn?.open) { this.toast('スマホが接続されていません'); return }
+    for (const file of Array.from(files)) {
+      const id = rand(10)
+      const t: Transfer = { id, name: file.name, size: file.size, mime: file.type, done: 0, dir: 'out', state: 'active' }
+      this.set({ transfers: [t, ...this.state.transfers] })
+      this.send({ t: 'fs_put_start', id, dir, name: file.name, size: file.size, mime: file.type || 'application/octet-stream' })
+      try {
+        for (let off = 0; off < file.size; off += CHUNK) {
+          const buf = await file.slice(off, off + CHUNK).arrayBuffer()
+          while (this.conn && this.conn.buffered() > 4 * 1024 * 1024) await new Promise((r) => setTimeout(r, 30))
+          if (!this.conn?.open) throw new Error('closed')
+          this.send({ t: 'fs_put_chunk', id, d: b64(buf) })
+          if ((off / CHUNK) % 8 === 0) this.updT(id, { done: off + buf.byteLength })
+        }
+        this.send({ t: 'fs_put_end', id }); this.updT(id, { state: 'done', done: file.size })
+      } catch { this.updT(id, { state: 'error' }) }
+    }
+  }
+
+  // ---------------- Find （探す） ----------------
+  getLocation() { this.set({ locBusy: true, locError: undefined }); this.send({ t: 'get', what: 'location' }) }
+
   clearTransfers() { this.set({ transfers: this.state.transfers.filter((t) => t.state === 'active') }) }
 }
 

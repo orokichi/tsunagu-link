@@ -78,6 +78,26 @@ function Pairing() {
   )
 }
 
+/* 「スマホを鳴らす」: 通常クリック = 音、右クリック / 長押し（600ms）= 振動。
+   Long-press and context menu both suppress the click that follows them, so
+   the ringer never fires by accident after a vibrate. */
+function RingButton({ className = 'btn filled' }: { className?: string }) {
+  const timer = useRef<number | undefined>(undefined)
+  const suppressUntil = useRef(0)
+  const vibrate = () => { suppressUntil.current = Date.now() + 800; link.send({ t: 'vibrate', on: true }) }
+  const clear = () => { if (timer.current) { clearTimeout(timer.current); timer.current = undefined } }
+  return (
+    <button className={className}
+      title="クリックで音を鳴らす／右クリック・長押しで振動させる"
+      onClick={() => { if (Date.now() < suppressUntil.current) return; link.send({ t: 'ring', on: true }) }}
+      onContextMenu={(e) => { e.preventDefault(); clear(); vibrate() }}
+      onPointerDown={() => { clear(); timer.current = window.setTimeout(vibrate, 600) }}
+      onPointerUp={clear} onPointerLeave={clear} onPointerCancel={clear}>
+      <Icon n="ring_volume" />スマホを鳴らす
+    </button>
+  )
+}
+
 /* ---------- Home ---------- */
 function Home({ go }: { go: (v: string) => void }) {
   const s = useLink()
@@ -103,7 +123,7 @@ function Home({ go }: { go: (v: string) => void }) {
       <section className="card actions">
         <h3>クイック操作</h3>
         <div className="btn-group">
-          <button className="btn filled" onClick={() => link.send({ t: 'ring', on: true })}><Icon n="ring_volume" />スマホを鳴らす</button>
+          <RingButton />
           <button className="btn tonal" onClick={() => link.pushClipboard(true)}><Icon n="content_paste_go" />クリップボード送信</button>
           <label className="btn tonal"><Icon n="nearby" />Quick Share で送信<input type="file" multiple hidden onChange={(e) => e.target.files && link.sendFiles(e.target.files)} /></label>
         </div>
@@ -197,6 +217,9 @@ function Messages() {
   const msgs = sel ? s.sms[sel] || [] : []
   const end = useRef<HTMLDivElement>(null)
   useEffect(() => { end.current?.scrollIntoView({ block: 'end' }) }, [msgs.length, sel])
+  // Leaving the messages screen stops the phone from treating the open
+  // conversation as being read on the PC.
+  useEffect(() => () => link.clearWatch(), [])
   const send = (e: React.FormEvent) => {
     e.preventDefault(); const addr = th ? th.address : to
     if (!text || !addr) return
@@ -207,9 +230,9 @@ function Messages() {
       <div className="card threads">
         <header className="pane-h"><h2>メッセージ</h2><button className="icon-btn filled" title="新規" onClick={() => setSel('new')}><Icon n="edit_square" /></button></header>
         {s.threads.map((t) => (
-          <button key={t.id} className={'thread ' + (sel === t.id ? 'sel' : '')} onClick={() => { setSel(t.id); link.openThread(t.id) }}>
+          <button key={t.id} className={'thread ' + (sel === t.id ? 'sel' : '') + ((t.unreadCount || 0) > 0 ? ' unread' : '')} onClick={() => { setSel(t.id); link.openThread(t.id) }}>
             <div className="avatar letter">{(t.name || t.address).slice(0, 1)}</div>
-            <div className="body"><div className="row"><b>{t.name || t.address}</b>{t.kind === 'rcs' && <span className="kind-chip">RCS</span>}{t.kind === 'mms' && <span className="kind-chip">MMS</span>}<span className="muted small">{fmtTime(t.time)}</span></div><p className="muted">{t.snippet}</p></div>
+            <div className="body"><div className="row"><b>{t.name || t.address}</b>{t.kind === 'rcs' && <span className="kind-chip">RCS</span>}{t.kind === 'mms' && <span className="kind-chip">MMS</span>}<span className="muted small">{fmtTime(t.time)}</span>{(t.unreadCount || 0) > 0 && <span className="unread-badge">{t.unreadCount}</span>}</div><p className="muted">{t.snippet}</p></div>
           </button>
         ))}
         {!s.threads.length && <Empty icon="sms" text="メッセージへのアクセスを許可すると表示されます" />}
@@ -329,6 +352,88 @@ function Files() {
   )
 }
 
+/* ---------- Explorer ---------- */
+const fsJoin = (a: string, b: string) => (a ? a + '/' + b : b)
+function Explorer() {
+  const s = useLink()
+  const path = s.fsPath
+  useEffect(() => { link.fsList(link.get().fsPath) }, [])
+  const segs = path ? path.split('/') : []
+  const parent = segs.slice(0, -1).join('/')
+  return (
+    <div className="pane">
+      <header className="pane-h"><h2>エクスプローラー</h2>
+        <button className="icon-btn" title="更新" onClick={() => link.fsList(path)}><Icon n="refresh" /></button>
+        <button className="btn tonal" onClick={() => { const name = prompt('新しいフォルダ名'); if (name) link.fsMkdir(path, name) }}><Icon n="create_new_folder" />新規フォルダ</button>
+        <label className="btn tonal"><Icon n="upload_file" />アップロード<input type="file" multiple hidden onChange={(e) => { if (e.target.files) link.fsUpload(e.target.files, path); e.target.value = '' }} /></label>
+      </header>
+      {s.fsReady && !s.fsAccess && <div className="warn-card">
+        <Icon n="lock" />
+        <div><b>すべてのファイルへのアクセスが許可されていません</b>
+          <p className="small">許可がないフォルダは中身が表示されません。スマホの Tsunagu アプリの「連携する機能」→「エクスプローラー（全ファイル）」からも許可できます。</p></div>
+        <button className="btn filled" onClick={() => link.fsPerm()}>スマホで許可画面を開く</button>
+      </div>}
+      <div className="crumbs">
+        <button className="crumb" onClick={() => link.fsList('')}><Icon n="smartphone" />内部ストレージ</button>
+        {segs.map((seg, i) => (
+          <span key={i} className="crumb-wrap"><Icon n="chevron_right" className="crumb-sep" /><button className="crumb" onClick={() => link.fsList(segs.slice(0, i + 1).join('/'))}>{seg}</button></span>
+        ))}
+      </div>
+      <div className="card list-card">
+        {path && <button className="thread" onClick={() => link.fsList(parent)}>
+          <div className="avatar"><Icon n="drive_folder_upload" /></div>
+          <div className="body"><b>..</b><p className="muted">上のフォルダへ</p></div>
+        </button>}
+        {s.fsItems.map((it) => {
+          const full = fsJoin(path, it.name)
+          return (
+            <div key={it.name} className="thread fs-row" onClick={() => { if (it.dir) link.fsList(full) }}>
+              <div className={'avatar ' + (it.dir ? 'folder' : '')}><Icon n={it.dir ? 'folder' : 'description'} /></div>
+              <div className="body">
+                <div className="row"><b>{it.name}</b><span className="muted small">{it.time ? new Date(it.time).toLocaleString('ja-JP', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}</span></div>
+                <p className="muted">{it.dir ? 'フォルダ' : fmtSize(it.size)}</p>
+              </div>
+              {!it.dir && <button className="icon-btn" title="PC にダウンロード" onClick={(e) => { e.stopPropagation(); link.fsDownload(full) }}><Icon n="download" /></button>}
+              <button className="icon-btn" title="名前を変更" onClick={(e) => { e.stopPropagation(); const name = prompt('新しい名前', it.name); if (name && name !== it.name) link.fsRename(full, name) }}><Icon n="edit" /></button>
+              <button className="icon-btn" title="削除" onClick={(e) => { e.stopPropagation(); if (confirm(`「${it.name}」を削除しますか？${it.dir ? '\nフォルダの中身もすべて削除されます。' : ''}\nこの操作は取り消せません。`)) link.fsDelete(full) }}><Icon n="delete" /></button>
+            </div>
+          )
+        })}
+        {s.fsReady && !s.fsItems.length && <Empty icon="folder_open" text={path ? 'このフォルダは空です' : 'ファイルが表示されません（許可が必要な場合があります）'} />}
+        {!s.fsReady && <Empty icon="folder_open" text="読み込み中…" />}
+      </div>
+    </div>
+  )
+}
+
+/* ---------- Find （探す） ---------- */
+function Find() {
+  const s = useLink()
+  useEffect(() => { link.getLocation() }, [])
+  const loc = s.loc
+  const embed = loc ? `https://www.openstreetmap.org/export/embed.html?bbox=${loc.lng - 0.006}%2C${loc.lat - 0.004}%2C${loc.lng + 0.006}%2C${loc.lat + 0.004}&layer=mapnik&marker=${loc.lat}%2C${loc.lng}` : ''
+  const osmLink = loc ? `https://www.openstreetmap.org/?mlat=${loc.lat}&mlon=${loc.lng}#map=17/${loc.lat}/${loc.lng}` : ''
+  return (
+    <div className="pane">
+      <header className="pane-h"><h2>探す</h2>
+        <button className="btn tonal" disabled={s.locBusy} onClick={() => link.getLocation()}><Icon n="my_location" />{s.locBusy ? '取得中…' : '位置を再取得'}</button>
+        <RingButton className="btn tonal" />
+      </header>
+      {s.locError === 'permission' && <div className="warn-card"><Icon n="location_off" /><div><b>位置情報が許可されていません</b><p className="small">スマホの Tsunagu アプリで「位置情報」を許可してください（アプリのホーム画面の「連携する機能」から許可できます）。</p></div></div>}
+      {s.locError === 'unavailable' && <div className="warn-card"><Icon n="location_off" /><div><b>位置を取得できませんでした</b><p className="small">スマホの位置情報がオフになっているか、電波の届かない場所にいる可能性があります。スマホの設定で位置情報をオンにして、もう一度お試しください。</p></div></div>}
+      {loc ? <>
+        <div className="card find-meta">
+          <Stat icon="my_location" label="精度" value={loc.acc != null ? `±${Math.round(loc.acc)} m` : '—'} />
+          <Stat icon="schedule" label="最終取得" value={new Date(loc.time).toLocaleString('ja-JP')} />
+          <a className="btn text" href={osmLink} target="_blank" rel="noreferrer"><Icon n="open_in_new" />OpenStreetMap で開く</a>
+        </div>
+        <iframe title="OpenStreetMap" className="map-frame" src={embed} loading="lazy" />
+        <p className="muted small">地図データ © OpenStreetMap contributors</p>
+      </> : !s.locError && <Empty icon="location_searching" text={s.locBusy ? 'スマホの位置を取得しています…' : '位置情報がまだありません'} />}
+    </div>
+  )
+}
+
 /* ---------- Clipboard ---------- */
 function Clipboard() {
   const s = useLink()
@@ -358,7 +463,8 @@ function Clipboard() {
 /* ---------- Shell ---------- */
 const NAV = [
   ['home', 'ホーム', 'home'], ['notifs', '通知', 'notifications'], ['messages', 'メッセージ', 'chat'],
-  ['calls', '通話', 'call'], ['photos', '写真', 'photo_library'], ['files', 'Quick Share', 'nearby'], ['clip', 'クリップボード', 'content_paste'],
+  ['calls', '通話', 'call'], ['photos', '写真', 'photo_library'], ['files', 'Quick Share', 'nearby'],
+  ['explorer', 'エクスプローラー', 'folder_open'], ['find', '探す', 'location_on'], ['clip', 'クリップボード', 'content_paste'],
 ] as const
 
 export default function App() {
@@ -367,12 +473,54 @@ export default function App() {
   const [drag, setDrag] = useState(false)
   useEffect(() => { applyTheme(s.seed); const mq = matchMedia('(prefers-color-scheme: dark)'); const f = () => applyTheme(s.seed); mq.addEventListener('change', f); return () => mq.removeEventListener('change', f) }, [s.seed])
   const connected = s.status === 'connected'
+  const connectedRef = useRef(false)
+  connectedRef.current = connected
   useEffect(() => { if (s.focusNotif) setView('notifs') }, [s.focusNotif])
-  const badges = useMemo(() => ({ notifs: s.notifs.length } as Record<string, number>), [s.notifs.length])
+  // Drop overlay: driven by window-level drag events with an enter/leave
+  // counter. The old element-level dragleave check got stuck whenever the
+  // drag ended without a drop (leaving the window, Esc, drop elsewhere),
+  // because no event ever cleared the state. Every exit path now resets:
+  // counter reaching 0, leaving the window (relatedTarget === null), drop,
+  // dragend and window blur.
+  useEffect(() => {
+    let count = 0
+    const hasFiles = (e: DragEvent) => !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')
+    const reset = () => { count = 0; setDrag(false) }
+    const enter = (e: DragEvent) => { if (!connectedRef.current || !hasFiles(e)) return; count++; setDrag(true) }
+    const over = (e: DragEvent) => { if (hasFiles(e)) e.preventDefault() }
+    const leave = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      if (!e.relatedTarget) { reset(); return }
+      count = Math.max(0, count - 1); if (count === 0) setDrag(false)
+    }
+    const drop = (e: DragEvent) => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      const files = e.dataTransfer?.files
+      reset()
+      if (connectedRef.current && files && files.length) { link.sendFiles(files); setView('files') }
+    }
+    window.addEventListener('dragenter', enter)
+    window.addEventListener('dragover', over)
+    window.addEventListener('dragleave', leave)
+    window.addEventListener('drop', drop)
+    window.addEventListener('dragend', reset)
+    window.addEventListener('blur', reset)
+    return () => {
+      window.removeEventListener('dragenter', enter)
+      window.removeEventListener('dragover', over)
+      window.removeEventListener('dragleave', leave)
+      window.removeEventListener('drop', drop)
+      window.removeEventListener('dragend', reset)
+      window.removeEventListener('blur', reset)
+    }
+  }, [])
+  const badges = useMemo(() => ({
+    notifs: s.notifs.length,
+    messages: s.threads.reduce((a, t) => a + (t.unreadCount || 0), 0),
+  } as Record<string, number>), [s.notifs.length, s.threads])
   return (
-    <div className={'app ' + (drag ? 'dragging' : '')}
-      onDragOver={(e) => { if (connected) { e.preventDefault(); setDrag(true) } }} onDragLeave={(e) => { if (e.target === e.currentTarget) setDrag(false) }}
-      onDrop={(e) => { e.preventDefault(); setDrag(false); if (e.dataTransfer.files.length) { link.sendFiles(e.dataTransfer.files); setView('files') } }}>
+    <div className={'app ' + (drag ? 'dragging' : '')}>
       <nav className="rail">
         <div className="brand"><img src="/icon.svg" alt="" /><span>Tsunagu</span></div>
         {connected && <label className="fab"><Icon n="upload" fill /><span>送る</span><input type="file" multiple hidden onChange={(e) => e.target.files && (link.sendFiles(e.target.files), setView('files'))} /></label>}
@@ -388,7 +536,8 @@ export default function App() {
           <button className="btn filled danger" onClick={() => link.send({ t: 'call_end' })}><Icon n="call_end" />拒否</button></div>}
         {!connected ? <Pairing /> :
           view === 'home' ? <Home go={setView} /> : view === 'notifs' ? <Notifs /> : view === 'messages' ? <Messages /> :
-          view === 'calls' ? <Calls /> : view === 'photos' ? <Photos /> : view === 'files' ? <Files /> : <Clipboard />}
+          view === 'calls' ? <Calls /> : view === 'photos' ? <Photos /> : view === 'files' ? <Files /> :
+          view === 'explorer' ? <Explorer /> : view === 'find' ? <Find /> : <Clipboard />}
       </main>
       {s.pending && <div className="scrim"><div className="dialog"><Cookie lobes={6}><Icon n="phonelink_lock" /></Cookie><h3>{s.pending.name} が接続しようとしています</h3><p className="muted">コード入力で接続したデバイスです。許可すると、次回からは自動で接続されます。</p>
         <div className="dialog-actions"><button className="btn text" onClick={s.pending.reject}>拒否</button><button className="btn filled" onClick={s.pending.accept}>許可</button></div></div></div>}
