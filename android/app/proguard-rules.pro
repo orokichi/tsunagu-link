@@ -1,0 +1,3 @@
+-dontwarn org.jetbrains.annotations.**
+-keepclassmembers class * { @android.webkit.JavascriptInterface <methods>; }
+-keep class com.orokichi.tsunagu.LinkService$Bridge { *; }

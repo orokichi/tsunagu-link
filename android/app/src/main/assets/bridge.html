@@ -1,0 +1,36 @@
+<!doctype html><html><head><meta charset="utf-8"><script src="peerjs.min.js"></script></head><body><script>
+const N = window.TsunaguNative;
+let peer = null, conn = null, target = '', hello = {}, retry = 1500, timer = null;
+function st(s) { N.onStatus(s); }
+function schedule(full) {
+  clearTimeout(timer);
+  timer = setTimeout(() => { if (full || !peer || peer.destroyed || !peer.open) init(); else connect(); }, retry);
+  retry = Math.min(retry * 1.6, 30000);
+}
+function init() {
+  try { if (peer && !peer.destroyed) peer.destroy(); } catch (e) {}
+  st('connecting');
+  peer = new Peer({ debug: 0 });
+  peer.on('open', () => connect());
+  peer.on('disconnected', () => { if (!peer.destroyed) { try { peer.reconnect(); } catch (e) { schedule(true); } } });
+  peer.on('error', (e) => { st('error:' + e.type); schedule(e.type !== 'peer-unavailable'); });
+}
+function connect() {
+  if (conn) { try { conn.close(); } catch (e) {} }
+  st('connecting');
+  const c = peer.connect(target, { reliable: true, serialization: 'json' });
+  conn = c;
+  c.on('open', () => { retry = 1500; c.send(Object.assign({ t: 'hello' }, hello)); });
+  c.on('data', (d) => { try { N.onMessage(JSON.stringify(d)); } catch (e) {} });
+  c.on('close', () => { if (conn === c) { conn = null; st('disconnected'); schedule(false); } });
+  c.on('error', () => {});
+}
+window.B = {
+  start(code, helloJson) { target = 'tsunagu-link-' + code.toLowerCase(); hello = JSON.parse(helloJson); retry = 1500; init(); },
+  kick() { if (!conn || !conn.open) { retry = 500; schedule(!peer || !peer.open); } },
+  stop() { clearTimeout(timer); try { conn && conn.close(); peer && peer.destroy(); } catch (e) {} conn = null; peer = null; st('idle'); },
+  send(json) { if (conn && conn.open) { conn.send(JSON.parse(json)); return conn.dataChannel ? conn.dataChannel.bufferedAmount : 0; } return -1; },
+  buffered() { return conn && conn.open && conn.dataChannel ? conn.dataChannel.bufferedAmount : -1; }
+};
+N.onReady();
+</script></body></html>

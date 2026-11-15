@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Tsunagu</string>
+    <string name="share_label">PC に送る</string>
+    <string name="tile_label">クリップボードを PC へ</string>
+</resources>
