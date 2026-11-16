@@ -43,16 +43,16 @@ jobs:
         id: ver
         run: echo "name=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)" >> "$GITHUB_OUTPUT"
       - name: Rename APK
-        run: cp app/build/outputs/apk/release/app-release.apk "../QuickLink-v${{ steps.ver.outputs.name }}.apk"
+        run: cp app/build/outputs/apk/release/app-release.apk "../Tsunagu-v${{ steps.ver.outputs.name }}.apk"
       - uses: actions/upload-artifact@v4
         with:
-          name: QuickLink-apk
-          path: QuickLink-*.apk
+          name: Tsunagu-apk
+          path: Tsunagu-*.apk
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.name }}
-          name: Quick Link v${{ steps.ver.outputs.name }}
+          name: Tsunagu v${{ steps.ver.outputs.name }}
           body_path: android/RELEASE_NOTES.md
-          files: QuickLink-*.apk
+          files: Tsunagu-*.apk
           make_latest: true
