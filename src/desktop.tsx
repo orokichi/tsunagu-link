@@ -268,7 +268,9 @@ export default function Desktop({ s, view, setView, renderView, badges }: {
    *  window to the dock and shows the desktop again. */
   const open = useCallback((v: string) => {
     setDrawer(false)
-    if (v === 'home') { setWins((ws) => ws.map((w) => ({ ...w, min: true }))); return }
+    // 「ホーム」 clears the desktop — unless the phone is not paired yet, where
+    // the home view is the pairing screen and has to be somewhere to land on.
+    if (v === 'home' && s.status === 'connected') { setWins((ws) => ws.map((w) => ({ ...w, min: true }))); return }
     const nz = ++zRef.current
     setWins((ws) => {
       const hit = ws.find((w) => w.view === v)
@@ -285,7 +287,7 @@ export default function Desktop({ s, view, setView, renderView, badges }: {
       if (y + h > vh - 104) h = Math.max(320, vh - 104 - y)
       return [...ws, { id: 'w' + nz, view: v, x, y, w, h, z: nz, min: false, max: false, phone: false }]
     })
-  }, [vw, vh, minX])
+  }, [vw, vh, minX, s.status])
   /** Dock / drawer / shortcut: keep the app's view in step and open the window. */
   const pick = useCallback((v: string) => { setView(v); open(v) }, [open, setView])
 

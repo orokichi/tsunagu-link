@@ -78,8 +78,18 @@ export default function Remote() {
     const p = norm(e)
     if (p) setCursor(p)
     const d = drag.current
-    if (!d || !p) return
+    if (!d || !p) { hover(p) ; return }
     if (Math.hypot(p.x - d.x, p.y - d.y) > 0.012) d.moved = true
+  }
+  // The phone shows a small ring where this pointer is (TYPE_ACCESSIBILITY_OVERLAY),
+  // so the person holding it can see what the PC is pointing at.
+  const hoverAt = useRef(0)
+  const hover = (p: { x: number; y: number } | null) => {
+    if (!p || !acc || !live) return
+    const now = Date.now()
+    if (now - hoverAt.current < 140) return
+    hoverAt.current = now
+    link.send({ t: 'rm_hover', x: p.x, y: p.y })
   }
   const up = (e: React.PointerEvent) => {
     const d = drag.current
@@ -164,6 +174,17 @@ export default function Remote() {
           <button className="icon-btn sm" title="状態を再取得" onClick={() => link.remoteRefresh()}><Icon n="refresh" /></button>
         </div>
       </header>
+
+      {!s.via && (
+        <section className="rp-perm card">
+          <Icon n="phonelink_off" />
+          <div>
+            <b>スマートフォンに接続していません</b>
+            <p className="small muted">設定 →「接続方法」でスマートフォンとつないでから、この画面を使います。つながると、画面の状態と許可状態がここに出ます。</p>
+          </div>
+          <button className="btn tonal" onClick={() => link.remoteRefresh()}><Icon n="refresh" />状態を確認</button>
+        </section>
+      )}
 
       {!acc && (
         <section className="rp-perm card">

@@ -247,6 +247,8 @@ val PERMS = listOf(
     Perm(Icons.Rounded.Folder, "エクスプローラー（全ファイル）", "スマホ内のファイルを PC から閲覧・送受信・削除・名前変更", special = "allfiles"),
     Perm(Icons.Rounded.MyLocation, "位置情報", "「探す」でスマホの現在地を PC の地図（OpenStreetMap）に表示", listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)),
     Perm(Icons.Rounded.LocationSearching, "位置情報（常に許可）", "アプリを開いていないときも「探す」で現在地を取得します", special = "location_always"),
+    Perm(Icons.Rounded.TouchApp, "ユーザー補助（リモート操作）", "PC の「スマホ操作」からタップ・スワイプ・文字入力・戻る／ホームで操作します", special = "accessibility"),
+    Perm(Icons.Rounded.ScreenShare, "画面ミラーリング", "PC にスマホの画面をリアルタイムで表示します（開始のたびに許可の確認が出ます）", special = "projection"),
     Perm(Icons.Rounded.NotificationsActive, "アプリの通知", "受信ファイル・リンク・鳴らす機能の通知", listOf(Manifest.permission.POST_NOTIFICATIONS)),
     Perm(Icons.Rounded.BatterySaver, "バックグラウンドで常時接続", "電池の最適化を除外して接続を維持", special = "battery"),
     Perm(Icons.Rounded.OpenInNew, "リンクを直接開く", "PC から送ったリンクを即座に開く（他のアプリの上に表示）", special = "overlay"),
@@ -261,6 +263,8 @@ fun granted(ctx: Context, p: Perm): Boolean = when (p.special) {
     "allfiles" -> android.os.Environment.isExternalStorageManager()
     "write_settings" -> SysControls.canWrite(ctx)
     "dnd" -> SysControls.dndAccess(ctx)
+    "accessibility" -> QuickLinkAccessibilityService.enabled(ctx)
+    "projection" -> MirrorService.running
     "location_always" -> Features.locAlways(ctx)
     // Partial ("selected photos") access counts: the chosen photos/videos are usable.
     "media" -> (ctx.checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED &&
@@ -542,6 +546,11 @@ fun grant(ctx: Context, p: Perm, request: (Array<String>) -> Unit) {
         }
         "write_settings" -> runCatching { ctx.startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:${ctx.packageName}"))) }
         "dnd" -> runCatching { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)) }
+        // ユーザー補助 is switched on in system settings; the app cannot ask for it
+        // with a dialog, only open that screen.
+        "accessibility" -> runCatching { ctx.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+        // 画面共有 raises the system MediaProjection dialog (every time).
+        "projection" -> MirrorService.request(ctx)
         // 常に許可 has no runtime dialog on Android 11+: the app asks in the
         // foreground and, when needed, sends the user to the location settings.
         "location_always" -> ctx.startActivity(Intent(ctx, MainActivity::class.java)

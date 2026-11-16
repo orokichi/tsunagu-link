@@ -176,67 +176,66 @@ export function QuickAIChat({ onOpenSettings, onClose }: { onOpenSettings?: () =
         {onClose && <button className="icon-btn sm" title="閉じる" onClick={onClose}><Icon n="close" /></button>}
       </header>
 
-      {!ready ? (
-        <div className="ai-setup qai-setup">
-          <GroqIcon size={40} />
-          <b>Groq Console API キーが必要です</b>
-          <p className="small muted">設定 →「クイックAI（Groq Console API）」でキーを保存すると、スマホの操作やウィジェット作成を頼めるようになります。キーはこのブラウザにだけ保存され、Groq 以外には送られません。</p>
-          {onOpenSettings && <button className="btn filled" onClick={onOpenSettings}><Icon n="settings" />設定を開く</button>}
-        </div>
-      ) : (
-        <>
-          <div className="qai-log" ref={logRef}>
-            {!lines.length && (
-              <div className="qai-hello">
-                <span className="qai-orb"><SiriOrb state={orb} size={56} amplitude={amp} /></span>
-                <h2>こんにちは、クイックAIです</h2>
-                <p className="muted">つないだスマートフォンのことを聞いたり、操作したり、ウィジェットを作ったりできます。</p>
-              </div>
-            )}
-            {lines.map((l) =>
-              l.who === 'tool' ? (
-                <div key={l.id} className={'ai-tool' + (l.pending ? ' pending' : l.ok ? ' ok' : ' fail')}>
-                  <Icon n={l.pending ? 'progress_activity' : l.ok ? 'check_circle' : 'error'} className={l.pending ? 'spin' : ''} />
-                  <span className="small">{l.text}</span>
-                </div>
-              ) : l.who === 'user' ? (
-                <div key={l.id} className="qai-turn user"><div className="qai-bubble user">{l.text}</div></div>
-              ) : (
-                <div key={l.id} className="qai-turn ai">
-                  <span className="qai-avatar"><GroqIcon size={16} /></span>
-                  <div className="qai-bubble ai">{l.text}</div>
-                </div>
-              ),
-            )}
-            {busy && !lines.some((l) => l.pending) && (
-              <div className="qai-turn ai"><span className="qai-avatar"><GroqIcon size={16} /></span>
-                <div className="qai-bubble ai thinking"><span className="dots"><i /><i /><i /></span></div></div>
-            )}
+      <div className="qai-log" ref={logRef}>
+        {!lines.length && (
+          <div className="qai-hello">
+            <span className="qai-orb"><SiriOrb state={orb} size={56} amplitude={amp} /></span>
+            <h2>こんにちは、クイックAIです</h2>
+            <p className="muted">つないだスマートフォンのことを聞いたり、操作したり、ウィジェットを作ったりできます。</p>
           </div>
-
-          {err && <div className="ai-err small"><Icon n="error" />{err}</div>}
-
-          {!lines.length && (
-            <div className="qai-chips">
-              {CHIPS.map((c) => <button key={c} className="qai-chip" disabled={busy} onClick={() => void send(c)}><Icon n="auto_awesome" />{c}</button>)}
+        )}
+        {!ready && (
+          <div className="qai-setup-card">
+            <span className="qai-avatar"><GroqIcon size={16} /></span>
+            <div>
+              <b>Groq Console API キーが必要です</b>
+              <p className="small muted">設定 →「クイックAI（Groq Console API）」でキーを保存すると、スマホの操作やウィジェット作成を頼めます。キーはこのブラウザにだけ保存され、Groq 以外には送られません。</p>
             </div>
-          )}
+            {onOpenSettings && <button className="btn tonal" onClick={onOpenSettings}><Icon n="settings" />設定を開く</button>}
+          </div>
+        )}
+        {lines.map((l) =>
+          l.who === 'tool' ? (
+            <div key={l.id} className={'ai-tool' + (l.pending ? ' pending' : l.ok ? ' ok' : ' fail')}>
+              <Icon n={l.pending ? 'progress_activity' : l.ok ? 'check_circle' : 'error'} className={l.pending ? 'spin' : ''} />
+              <span className="small">{l.text}</span>
+            </div>
+          ) : l.who === 'user' ? (
+            <div key={l.id} className="qai-turn user"><div className="qai-bubble user">{l.text}</div></div>
+          ) : (
+            <div key={l.id} className="qai-turn ai">
+              <span className="qai-avatar"><GroqIcon size={16} /></span>
+              <div className="qai-bubble ai">{l.text}</div>
+            </div>
+          ),
+        )}
+        {busy && !lines.some((l) => l.pending) && (
+          <div className="qai-turn ai"><span className="qai-avatar"><GroqIcon size={16} /></span>
+            <div className="qai-bubble ai thinking"><span className="dots"><i /><i /><i /></span></div></div>
+        )}
+      </div>
 
-          <form className="qai-input" onSubmit={(e) => { e.preventDefault(); void send() }}>
-            <button type="button" className={'icon-btn' + (listening ? ' filled' : '')} title="音声で入力" aria-pressed={listening} onClick={mic}>
-              <Icon n={listening ? 'mic' : 'mic_none'} fill={listening} />
-            </button>
-            <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)}
-              placeholder={listening ? '聞いています…' : 'クイックAIにメッセージ'} aria-label="クイックAIへの指示" />
-            <button className="icon-btn filled qai-send" disabled={busy || !input.trim()} aria-label="送信"><Icon n="arrow_upward" fill /></button>
-          </form>
-          <p className="qai-note small muted">
-            {ls_.status === 'connected' ? `${ls_.device?.name || 'スマートフォン'} に接続中` : 'スマートフォン未接続（接続するまで操作はできません）'}
-            <span> · Groq / {shortModel(model)}</span>
-            <span> · 誤りを含む場合があります</span>
-          </p>
-        </>
+      {err && <div className="ai-err small"><Icon n="error" />{err}</div>}
+
+      {!lines.length && (
+        <div className="qai-chips">
+          {CHIPS.map((c) => <button key={c} className="qai-chip" disabled={busy || !ready} onClick={() => void send(c)}><Icon n="auto_awesome" />{c}</button>)}
+        </div>
       )}
+
+      <form className="qai-input" onSubmit={(e) => { e.preventDefault(); void send() }}>
+        <button type="button" className={'icon-btn' + (listening ? ' filled' : '')} title="音声で入力" aria-pressed={listening} onClick={mic}>
+          <Icon n={listening ? 'mic' : 'mic_none'} fill={listening} />
+        </button>
+        <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)}
+          placeholder={listening ? '聞いています…' : 'クイックAIにメッセージ'} aria-label="クイックAIへの指示" />
+        <button className="icon-btn filled qai-send" disabled={busy || !input.trim()} aria-label="送信"><Icon n="arrow_upward" /></button>
+      </form>
+      <p className="qai-note small muted">
+        {ls_.status === 'connected' ? `${ls_.device?.name || 'スマートフォン'} に接続中` : 'スマートフォン未接続（接続するまで操作はできません）'}
+        <span> · Groq / {shortModel(model)}</span>
+        <span> · 誤りを含む場合があります</span>
+      </p>
     </div>
   )
 }

@@ -537,7 +537,7 @@ class LinkService : Service() {
                 activeVia = via; _via.value = via
                 js("B.setActive(${JSONObject.quote(via)})")
                 withContext(Dispatchers.Main) { setStatus("connected"); refreshFg() }
-                sendInfo(); sendNotifs()
+                sendInfo(); sendNotifs(); sendRemoteState()
                 infoJob?.cancel()
                 infoJob = scope.launch { while (isActive) { delay(60_000); sendInfo() } }
             }
@@ -579,6 +579,7 @@ class LinkService : Service() {
                 "location" -> sendLocation()
                 "fs" -> sendFsList(m.optString("path"))
                 "sys" -> sendSys()
+                "remote" -> sendRemoteState()
             }
             // ---- quick settings from the PC ----
             "sys_set" -> {
@@ -663,6 +664,11 @@ class LinkService : Service() {
                     if (runCatching { startActivity(i); true }.getOrDefault(false)) toast("スマホで Quick Link の「通知へのアクセス」をオンにしてください")
                     else toast("スマホの「設定」→「通知」→「通知へのアクセス」でオンにしてください")
                 }
+                "accessibility" -> {
+                    val i = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    if (runCatching { startActivity(i); true }.getOrDefault(false)) toast("スマホの「設定」→「ユーザー補助」で Quick Link をオンにしてください")
+                    else toast("スマホの「設定」→「ユーザー補助」で Quick Link をオンにしてください")
+                }
                 else -> launchApp("fix", "位置情報を許可する")
             }
             "notif_dismiss" -> {
@@ -689,6 +695,32 @@ class LinkService : Service() {
             "notif_reply" -> NotifListener.instance?.reply(m.optString("key"), m.optString("text"))?.let { ok -> toast(if (ok) "返信しました" else "返信できませんでした") }
             "notif_action" -> NotifListener.instance?.action(m.optString("key"), m.optInt("index"))
             "media_cmd" -> features.mediaCommand(m.optString("cmd"))
+            // ---- スマホ操作（リモート／ミラーリング） ----
+            "mirror_start" -> MirrorService.request(this)
+            "mirror_stop" -> MirrorService.stop(this)
+            "rm_tap" -> {
+                val svc = QuickLinkAccessibilityService.instance
+                if (svc == null) toast("スマホのユーザー補助がオフです")
+                else svc.tap(m.optDouble("x", .5).toFloat(), m.optDouble("y", .5).toFloat())
+            }
+            "rm_long" -> QuickLinkAccessibilityService.instance?.longPress(m.optDouble("x", .5).toFloat(), m.optDouble("y", .5).toFloat())
+            "rm_swipe" -> QuickLinkAccessibilityService.instance?.swipe(
+                m.optDouble("x1", .5).toFloat(), m.optDouble("y1", .5).toFloat(),
+                m.optDouble("x2", .5).toFloat(), m.optDouble("y2", .5).toFloat(),
+                m.optLong("ms", 220),
+            )
+            "rm_scroll" -> QuickLinkAccessibilityService.instance?.scroll(
+                m.optString("dir"), m.optDouble("x", .5).toFloat(), m.optDouble("y", .5).toFloat(),
+            )
+            "rm_text" -> QuickLinkAccessibilityService.instance?.typeText(m.optString("text"))
+            "rm_key" -> {
+                val svc = QuickLinkAccessibilityService.instance
+                if (svc == null) toast("スマホのユーザー補助がオフです")
+                else if (!svc.key(m.optString("key"))) toast("このキーは使えません")
+            }
+            "rm_hover" -> QuickLinkAccessibilityService.instance?.hover(
+                m.optDouble("x", .5).toFloat(), m.optDouble("y", .5).toFloat(),
+            )
             "sms_send" -> {
                 val ok = features.sendSms(m.optString("to"), m.optString("body"))
                 toast(if (ok) "SMS を送信しました" else "SMS を送信できませんでした（権限を確認してください）")
@@ -719,6 +751,15 @@ class LinkService : Service() {
     }
 
     fun toast(text: String) = send(msg("toast", "text" to text))
+
+    /** Tells the PC what スマホ操作 can do right now (user aid on/off, mirror state). */
+    fun sendRemoteState() {
+        if (!connected()) return
+        send(msg("remote_state",
+            "acc" to QuickLinkAccessibilityService.enabled(this),
+            "mirror" to MirrorService.state,
+            "w" to MirrorService.screenW, "h" to MirrorService.screenH, "fps" to MirrorService.fps))
+    }
 
     // ---------------- Notifications / messages to the PC ----------------
     private suspend fun sendNotifs() {

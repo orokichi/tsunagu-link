@@ -1103,3 +1103,21 @@ main > * { animation: enter .6s var(--spring-soft); }
 .rp-nav-btn:hover:not(:disabled) { background: var(--md-secondary-container); }
 .rp-nav-btn .ms { font-size: 20px; }
 @media (max-width: 900px) { .rp-body { grid-template-columns: minmax(0, 1fr); } .rp-side { max-height: 280px; } }
+
+/* ---- クイックAI window / board refinements ---- */
+/* The phone card and any 2×1 widget can use the whole board width. */
+.gbw.sz-medium, .gbw.sz-large { grid-column: span 2; }
+/* Inside its own window the app's name is already in the title bar: the header
+   keeps the model pill and the sound toggle, Gemini-style. */
+.qai-win .qai-head .qai-mark, .qai-win .qai-head .qai-name { display: none; }
+.qai-win .qai-head { padding-top: 6px; }
+.qai-setup-card { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 14px; border-radius: 20px; background: var(--md-surface-container-high); }
+.qai-setup-card > div { flex: 1; min-width: 160px; }
+.qai-setup-card b { font-size: 13px; }
+.qai-setup-card .qai-avatar { margin: 0; }
+.qai-hello { padding-bottom: 4px; }
+.gb-board-scroll { scrollbar-color: color-mix(in srgb, var(--md-on-surface) 22%, transparent) transparent; scrollbar-width: thin; }
+.gb-board-scroll::-webkit-scrollbar { width: 6px; }
+.gb-board-scroll::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--md-on-surface) 22%, transparent); border-radius: 3px; }
+.gb-board-scroll::-webkit-scrollbar-track { background: transparent; }
+.qai-log { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--md-on-surface) 22%, transparent) transparent; }

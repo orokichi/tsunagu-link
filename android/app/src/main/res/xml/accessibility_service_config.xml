@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ユーザー補助（リモート操作） — what the PC's "スマホ操作" app is allowed to do.
+
+  canPerformGestures        : taps, long presses, swipes and drags (dispatchGesture)
+  canRetrieveWindowContent  : find the focused text field to type into it
+  flagRetrieveInteractiveWindows : see the windows of other apps, so focus and
+                              node searches work outside this app
+  flagReportViewIds / flagIncludeNotImportantViews : reach fields that a
+                              minimal tree would hide
+  No event is acted on: the tree is only read when the PC asks for an action.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewFocused"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/a11y_desc"
+    android:notificationTimeout="120"
+    android:settingsActivity="com.orokichi.tsunagu.MainActivity" />

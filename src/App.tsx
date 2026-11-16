@@ -938,7 +938,7 @@ export default function App() {
   } as Record<string, number>), [s.notifs.length, s.threads])
   const renderView = (v: string) =>
     v === 'quickai' ? <QuickAIChat onOpenSettings={() => setView('settings')} /> :
-    v === 'remote' ? (!connected ? <Pairing /> : <Remote />) :
+    v === 'remote' ? <Remote /> :
     !connected && v !== 'settings' ? <Pairing /> :
     v === 'home' ? <Home go={setView} /> : v === 'notifs' ? <Notifs /> : v === 'messages' ? <Messages /> :
     v === 'calls' ? <Calls /> : v === 'photos' ? <Photos /> : v === 'files' ? <Files /> :
@@ -971,7 +971,7 @@ export default function App() {
           {/^https?:\/\/\S+$/.test(s.inbox.text.trim()) && <a className="btn tonal" href={s.inbox.text.trim()} target="_blank" rel="noreferrer" onClick={() => link.clearInbox()}><Icon n="open_in_new" />開く</a>}
           <button className="btn filled" onClick={() => { const t = s.inbox!.text; navigator.clipboard.writeText(t).then(() => link.toast('コピーしました')).catch(() => {}); link.clearInbox() }}><Icon n="content_copy" />コピー</button></div></div></div>}
       {drag && <div className="drop-overlay"><div className="qs-core lg"><QuickShareIcon size={54} /></div><b>ドロップして{s.device ? `${s.device.name} に送信` : 'スマホに送信'}</b></div>}
-      <QuickAI onOpen={() => setView('quickai')} />
+      {!s.bookUi && <QuickAI onOpen={() => setView('quickai')} />}
       <ShareSheet />
       <div className="toasts">{s.toasts.map((t) => <div key={t.id} className="toast">{t.text}{t.action && <button onClick={t.action.run}>{t.action.label}</button>}</div>)}</div>
     </div>
