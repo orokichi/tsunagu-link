@@ -48,16 +48,21 @@ export interface Toast { id: number; text: string; action?: { label: string; run
  *  whole desktop a dozen times a second); they reach the mirror canvas through
  *  `link.onFrame`. */
 export type MirrorState = 'off' | 'requesting' | 'live' | 'denied' | 'error'
+/** How the phone is taking the picture: "accessibility" = the popup-free
+ *  accessibility screenshot stream (no dialog, the platform's ~3 fps floor),
+ *  "projection" = MediaProjection (smooth, but a system dialog every start). */
+export type MirrorMode = '' | 'accessibility' | 'projection'
 export interface RemoteInfo {
   /** ユーザー補助（リモート操作） is switched on in Android settings. */
   acc: boolean
   mirror: MirrorState
+  mode: MirrorMode
   /** Phone screen size in pixels (what the touch coordinates are relative to). */
   w: number; h: number
   fps: number
   reason?: string
 }
-export const REMOTE_OFF: RemoteInfo = { acc: false, mirror: 'off', w: 0, h: 0, fps: 0 }
+export const REMOTE_OFF: RemoteInfo = { acc: false, mirror: 'off', mode: '', w: 0, h: 0, fps: 0 }
 
 export type PushState = 'unsupported' | 'off' | 'on' | 'blocked' | 'busy' | 'error'
 export interface State {
@@ -118,7 +123,7 @@ const ls = {
   del: (k: string) => localStorage.removeItem('ts.' + k),
 }
 const CHUNK = 48 * 1024
-export const APP_VERSION = '1.5.0'
+export const APP_VERSION = '1.5.1'
 /** How often the two ends ping each other, and how long silence is tolerated
  *  before the link is treated as dead (a data channel can stay "open" long
  *  after the other side is gone: Wi-Fi roamed, laptop slept, phone lost data). */
@@ -1237,12 +1242,15 @@ class Link {
       case 'remote_state': this.set({ remote: {
         acc: !!m.acc,
         mirror: (['off', 'requesting', 'live', 'denied', 'error'] as const).includes(m.mirror) ? m.mirror : 'off',
+        mode: (['accessibility', 'projection'] as const).includes(m.mode) ? m.mode : '',
         w: Number(m.w) || 0, h: Number(m.h) || 0, fps: Number(m.fps) || 0, reason: m.reason || undefined,
       } }); break
       case 'mirror_state': {
         const st = (['off', 'requesting', 'live', 'denied', 'error'] as const).includes(m.state) ? m.state : 'off'
-        this.set({ remote: { ...s.remote, mirror: st, w: Number(m.w) || s.remote.w, h: Number(m.h) || s.remote.h, fps: Number(m.fps) || 0, reason: m.reason || undefined } })
+        const mode = (['accessibility', 'projection'] as const).includes(m.mode) ? m.mode : s.remote.mode
+        this.set({ remote: { ...s.remote, mirror: st, mode, w: Number(m.w) || s.remote.w, h: Number(m.h) || s.remote.h, fps: Number(m.fps) || 0, reason: m.reason || undefined } })
         if (st === 'denied') this.toast('スマホで画面共有が許可されませんでした')
+        else if (st === 'error' && m.reason) this.toast('画面を取得できませんでした（' + (m.reason === 'secure' ? '保護された画面' : 'ユーザー補助の画面取得') + '）')
         break
       }
       case 'mirror_frame': this.onMirrorFrame(String(m.d || ''), Number(m.w) || 0, Number(m.h) || 0); break
@@ -1589,11 +1597,17 @@ class Link {
 
   /** Ask the phone to report ユーザー補助 / ミラーリング state. */
   remoteRefresh() { if (this.conn?.open) this.send({ t: 'get', what: 'remote' }) }
-  /** 「画面共有を開始」: the phone raises the MediaProjection dialog. */
-  mirrorStart() {
+  /** 「画面共有を開始」: by default the phone uses the popup-free accessibility
+   *  screenshot stream when ユーザー補助 is on; `mode: 'projection'` asks for the
+   *  smooth MediaProjection stream instead (that one raises Android's dialog). */
+  mirrorStart(mode?: 'projection' | 'accessibility') {
     if (!this.conn?.open) { this.toast('スマートフォンが接続されていません'); return }
-    this.send({ t: 'mirror_start' })
+    this.send({ t: 'mirror_start', mode: mode || '', long: 900, q: 62 })
     this.set({ remote: { ...this.state.remote, mirror: 'requesting', reason: undefined } })
+  }
+  /** 画質・大きさ（長辺 px）と JPEG 品質を、動いているストリームにも即反映。 */
+  mirrorOptions(long: number, q: number) {
+    if (this.conn?.open) this.send({ t: 'mirror_opts', long, q })
   }
   mirrorStop() {
     if (this.conn?.open) this.send({ t: 'mirror_stop' })
@@ -1606,7 +1620,7 @@ class Link {
 
   private onMirrorFrame(d: string, w: number, h: number) {
     const now = Date.now()
-    if (now - this.lastFrameAt < 40) return
+    if (now - this.lastFrameAt < 30) return
     this.lastFrameAt = now
     this.frameCb?.(d.startsWith('data:') ? d : 'data:image/jpeg;base64,' + d, w, h)
   }

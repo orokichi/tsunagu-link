@@ -22,7 +22,6 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
-import android.util.Base64
 import java.io.ByteArrayOutputStream
 import kotlin.math.max
 
@@ -46,10 +45,42 @@ class MirrorService : Service() {
         @Volatile var running = false
         /** off / requesting / live / denied / error */
         @Volatile var state = "off"
+        /** How the picture is being taken: "" | "projection" | "accessibility".
+         *  "accessibility" means the popup-free path (no system dialog, the
+         *  platform's ~3 fps screenshot floor); "projection" means MediaProjection
+         *  (smooth, but a system dialog at every start). */
+        @Volatile var mode = ""
         /** The phone's real screen size, what the PC's touch coordinates map to. */
         @Volatile var screenW = 0
         @Volatile var screenH = 0
         @Volatile var fps = 0
+
+        /** The accessibility screenshot stream took over (no dialog at all). */
+        fun liveByCapture(w: Int, h: Int) {
+            mode = "accessibility"
+            state = "live"
+            screenW = w
+            screenH = h
+            fps = 0
+            notifyState("live")
+        }
+
+        fun updateFps(f: Int) { if (mode == "accessibility") fps = f }
+
+        fun offByCapture() {
+            if (mode != "accessibility") return
+            mode = ""
+            state = "off"
+            fps = 0
+            notifyState("off")
+        }
+
+        fun captureFailed(code: Int) {
+            if (mode == "accessibility") mode = ""
+            state = "error"
+            fps = 0
+            notifyState("error", if (code == 2) "secure" else "capture")
+        }
 
         private const val ID = 2
         private const val EXTRA_CODE = "resultCode"
@@ -66,8 +97,9 @@ class MirrorService : Service() {
 
         /** Ask the user for the projection permission (always a fresh system dialog). */
         fun request(c: Context) {
-            if (running) { LinkService.instance?.sendRemoteState(); return }
+            if (running || mode == "accessibility") { LinkService.instance?.sendRemoteState(); return }
             state = "requesting"
+            mode = "projection"
             val i = Intent(c, MirrorActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
             // Starting an Activity from the background is only allowed with the
@@ -87,7 +119,7 @@ class MirrorService : Service() {
 
         internal fun notifyState(st: String, reason: String = "", w: Int = screenW, h: Int = screenH, f: Int = fps) {
             val l = LinkService.instance ?: return
-            l.send(l.msg("mirror_state", "state" to st, "w" to w, "h" to h, "fps" to f, "reason" to reason))
+            l.send(l.msg("mirror_state", "state" to st, "w" to w, "h" to h, "fps" to f, "reason" to reason, "mode" to mode))
         }
     }
 
@@ -119,6 +151,7 @@ class MirrorService : Service() {
         val p = runCatching { if (data != null) manager.getMediaProjection(code, data) else null }.getOrNull()
         if (p == null) {
             state = "error"
+            mode = ""
             notifyState("error", "projection")
             stopSelf()
             return START_NOT_STICKY
@@ -133,8 +166,9 @@ class MirrorService : Service() {
         val sh = dm.heightPixels
         screenW = sw
         screenH = sh
-        // Long side 720 px, even numbers (JPEG-friendly), never smaller than 2 px.
-        val scale = 720f / max(sw, sh).coerceAtLeast(1).toFloat()
+        mode = "projection"
+        // Long side 900 px, even numbers (JPEG-friendly), never smaller than 2 px.
+        val scale = 900f / max(sw, sh).coerceAtLeast(1).toFloat()
         captureW = max(2, ((sw * scale).toInt() / 2) * 2)
         captureH = max(2, ((sh * scale).toInt() / 2) * 2)
 
@@ -161,7 +195,7 @@ class MirrorService : Service() {
         try {
             if (closed) return
             val now = System.currentTimeMillis()
-            if (now - lastSent < 70) return // ~14 fps ceiling; the rest of the time is spend on encode/transport
+            if (now - lastSent < 50) return // ~20 fps ceiling; encode and transport take the rest
             val plane = image.planes[0]
             val w = captureW
             val h = captureH
@@ -173,7 +207,7 @@ class MirrorService : Service() {
             full.copyPixelsFromBuffer(plane.buffer)
             cropped = if (pad > 0) Bitmap.createBitmap(full, 0, 0, w, h) else full
             val out = ByteArrayOutputStream(64 * 1024)
-            cropped.compress(Bitmap.CompressFormat.JPEG, 55, out)
+            cropped.compress(Bitmap.CompressFormat.JPEG, 62, out)
             val bytes = out.toByteArray()
             frames++
             if (now - secondStart >= 1000) {
@@ -190,8 +224,9 @@ class MirrorService : Service() {
             lastSent = now
             val l = LinkService.instance ?: return
             if (!l.connected()) return
-            val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-            l.send(l.msg("mirror_frame", "d" to b64, "w" to screenW, "h" to screenH, "ts" to now))
+            // Same sender as the popup-free stream: a frame the link cannot take
+            // yet is dropped rather than queued (the newest picture wins).
+            l.sendMirrorFrame(bytes, screenW, screenH, now)
         } catch (e: Exception) {
             android.util.Log.w("QuickLink", "mirror frame", e)
         } finally {
@@ -212,6 +247,7 @@ class MirrorService : Service() {
         running = false
         state = st
         fps = 0
+        mode = ""
         runCatching { reader?.setOnImageAvailableListener(null, null) }
         runCatching { reader?.close() }
         reader = null
@@ -258,6 +294,9 @@ class MirrorActivity : Activity() {
             if (resultCode == RESULT_OK && data != null) {
                 MirrorService.start(this, resultCode, data)
             } else {
+                MirrorService.state = "denied"
+                MirrorService.mode = ""
+                MirrorService.fps = 0
                 MirrorService.notifyState("denied")
                 LinkService.instance?.toast("画面の共有が許可されませんでした")
             }

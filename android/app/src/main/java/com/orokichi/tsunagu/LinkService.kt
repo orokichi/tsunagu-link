@@ -255,6 +255,7 @@ class LinkService : Service() {
                 onMessage = { m ->
                     val t = m.optString("t")
                     if (t.startsWith("file_") || t.startsWith("fs_put")) fileQueue.trySend(m to "usb")
+                    else if (isRemote(t)) remoteExec.execute { runCatching { remote(m) } }
                     else scope.launch { handle(m, "usb") }
                 },
                 onClosed = { main.post { usbClosed() } },
@@ -303,6 +304,8 @@ class LinkService : Service() {
 
     override fun onDestroy() {
         instance = null
+        QuickLinkAccessibilityService.instance?.stopCapture()
+        runCatching { remoteExec.shutdownNow() }
         runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(net) }
         runCatching { unregisterReceiver(battery) }
         runCatching { unregisterReceiver(powerSave) }
@@ -332,7 +335,11 @@ class LinkService : Service() {
             val t = m.optString("t")
             // File transfers (both directions, incl. explorer uploads) must stay
             // strictly ordered, so they go through the serial file queue.
-            if (t.startsWith("file_") || t.startsWith("fs_put")) fileQueue.trySend(m to via) else scope.launch { handle(m, via) }
+            if (t.startsWith("file_") || t.startsWith("fs_put")) fileQueue.trySend(m to via)
+            // Pointer/keyboard actions are ordered too, and they are the ones the
+            // person feels: one dedicated thread, no coroutine hop.
+            else if (isRemote(t)) remoteExec.execute { runCatching { remote(m) } }
+            else scope.launch { handle(m, via) }
         }
         @JavascriptInterface fun onLanStatus(s: String) {
             main.post {
@@ -696,8 +703,14 @@ class LinkService : Service() {
             "notif_action" -> NotifListener.instance?.action(m.optString("key"), m.optInt("index"))
             "media_cmd" -> features.mediaCommand(m.optString("cmd"))
             // ---- スマホ操作（リモート／ミラーリング） ----
-            "mirror_start" -> MirrorService.request(this)
-            "mirror_stop" -> MirrorService.stop(this)
+            // Pointer and key messages normally arrive on the dedicated remote
+            // thread (see remote()); this branch is the fallback for a build that
+            // sends them through the generic path.
+            "mirror_start" -> startMirror(m)
+            "mirror_stop" -> stopMirror()
+            "mirror_opts" -> QuickLinkAccessibilityService.instance?.captureOptions(
+                m.optInt("long", 900), m.optInt("q", 62),
+            )
             "rm_tap" -> {
                 val svc = QuickLinkAccessibilityService.instance
                 if (svc == null) toast("スマホのユーザー補助がオフです")
@@ -707,7 +720,7 @@ class LinkService : Service() {
             "rm_swipe" -> QuickLinkAccessibilityService.instance?.swipe(
                 m.optDouble("x1", .5).toFloat(), m.optDouble("y1", .5).toFloat(),
                 m.optDouble("x2", .5).toFloat(), m.optDouble("y2", .5).toFloat(),
-                m.optLong("ms", 220),
+                m.optLong("ms", 160),
             )
             "rm_scroll" -> QuickLinkAccessibilityService.instance?.scroll(
                 m.optString("dir"), m.optDouble("x", .5).toFloat(), m.optDouble("y", .5).toFloat(),
@@ -752,12 +765,111 @@ class LinkService : Service() {
 
     fun toast(text: String) = send(msg("toast", "text" to text))
 
+    /* ---------------- スマホ操作: mirroring ---------------- */
+    /**
+     * 「画面共有を開始」.
+     *
+     * With ユーザー補助 already on — the grant the person gave once — the screen is
+     * taken through `AccessibilityService.takeScreenshot()`: no system dialog at
+     * all, so the PC really does show the phone the moment it opens. That path is
+     * limited by the platform (about one capture per 333 ms). Asking for
+     * `mode="projection"` (「なめらかモード」) uses MediaProjection instead, which is
+     * smoother but raises Android's consent dialog every time it starts.
+     */
+    private fun startMirror(m: JSONObject) {
+        if (MirrorService.running) { sendRemoteState(); return }
+        val want = m.optString("mode")
+        val long = m.optInt("long", 900)
+        val q = m.optInt("q", 62)
+        val svc = QuickLinkAccessibilityService.instance
+        if (want != "projection" && svc != null && QuickLinkAccessibilityService.enabled(this)) {
+            svc.startCapture(long, q)
+            sendRemoteState()
+            return
+        }
+        if (want != "projection" && svc == null && QuickLinkAccessibilityService.enabled(this)) {
+            // The service is switched on but not connected yet: give it a moment to
+            // come up rather than raising a dialog the person did not ask for.
+            main.postDelayed({
+                val s = QuickLinkAccessibilityService.instance
+                if (s != null) { s.startCapture(long, q); sendRemoteState() } else MirrorService.request(this)
+            }, 700)
+            return
+        }
+        MirrorService.request(this)
+    }
+
+    private fun stopMirror() {
+        QuickLinkAccessibilityService.instance?.stopCapture()
+        MirrorService.stop(this)
+        MirrorService.state = "off"
+        MirrorService.mode = ""
+        MirrorService.fps = 0
+        sendRemoteState()
+    }
+
+    /** One captured frame from the popup-free stream, already JPEG-encoded.
+     *  Frames are the only high-rate traffic on the link: a frame that cannot go
+     *  out yet is dropped instead of queued, so what the PC shows is always the
+     *  phone's newest picture and the person's taps never wait behind old ones. */
+    fun sendMirrorFrame(jpeg: ByteArray, w: Int, h: Int, ts: Long) {
+        if (!connected() || jpeg.isEmpty()) return
+        if (activeVia == "usb") {
+            val waiting = usbServer?.buffered() ?: 0L
+            if (waiting > 400_000L) return
+            send(msg("mirror_frame", "d" to Base64.encodeToString(jpeg, Base64.NO_WRAP), "w" to w, "h" to h, "ts" to ts))
+            return
+        }
+        if (!ready) return
+        val b64 = Base64.encodeToString(jpeg, Base64.NO_WRAP)
+        main.post {
+            if (!ready) return@post
+            // B.frame drops the frame itself when the channel is backed up.
+            web?.evaluateJavascript("B.frame(${JSONObject.quote(b64)},$w,$h,$ts)", null)
+        }
+    }
+
+    /* ---------------- スマホ操作: one ordered thread for input ---------------- */
+    /**
+     * Pointer, text and key messages run here, in the order they arrived, on a
+     * single dedicated thread. That is what makes control feel immediate: a tap
+     * is not queued behind a coroutine dispatch, and two quick taps can never
+     * reach the phone the wrong way round.
+     */
+    private val remoteExec = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "quicklink-remote").apply { isDaemon = true }
+    }
+
+    private fun isRemote(t: String) = t.startsWith("rm_") || t == "mirror_opts"
+
+    private fun remote(m: JSONObject) {
+        val svc = QuickLinkAccessibilityService.instance
+        when (m.optString("t")) {
+            "rm_tap" -> svc?.tap(m.optDouble("x", .5).toFloat(), m.optDouble("y", .5).toFloat())
+            "rm_long" -> svc?.longPress(m.optDouble("x", .5).toFloat(), m.optDouble("y", .5).toFloat())
+            "rm_swipe" -> svc?.swipe(
+                m.optDouble("x1", .5).toFloat(), m.optDouble("y1", .5).toFloat(),
+                m.optDouble("x2", .5).toFloat(), m.optDouble("y2", .5).toFloat(),
+                m.optLong("ms", 160),
+            )
+            "rm_scroll" -> svc?.scroll(m.optString("dir"), m.optDouble("x", .5).toFloat(), m.optDouble("y", .5).toFloat())
+            "rm_text" -> svc?.typeText(m.optString("text"))
+            "rm_key" -> {
+                if (svc == null) toast("スマホのユーザー補助がオフです")
+                else if (!svc.key(m.optString("key"))) toast("このキーは使えません")
+            }
+            "rm_hover" -> svc?.hover(m.optDouble("x", .5).toFloat(), m.optDouble("y", .5).toFloat())
+            "mirror_opts" -> svc?.captureOptions(m.optInt("long", 900), m.optInt("q", 62))
+        }
+    }
+
     /** Tells the PC what スマホ操作 can do right now (user aid on/off, mirror state). */
     fun sendRemoteState() {
         if (!connected()) return
         send(msg("remote_state",
             "acc" to QuickLinkAccessibilityService.enabled(this),
             "mirror" to MirrorService.state,
+            "mode" to MirrorService.mode,
             "w" to MirrorService.screenW, "h" to MirrorService.screenH, "fps" to MirrorService.fps))
     }
 

@@ -182,6 +182,26 @@ window.B = {
     }
     return -1;
   },
+  // One mirroring frame. Called with the JPEG already base64-encoded, so the
+  // message is built here instead of being parsed out of a JSON string, and a
+  // frame is DROPPED when the channel still holds one: the newest picture is the
+  // one worth showing, and a queue of stale frames is exactly what made control
+  // feel slow (every tap waited behind them).
+  frame(b64, w, h, ts) {
+    if (active === 'usb') return -1;
+    if (B.buffered() > 220000) return -1;
+    const msg = { t: 'mirror_frame', d: b64, w: w, h: h, ts: ts };
+    if (active === 'lan' && lanDc && lanDc.readyState === 'open') {
+      for (const f of encodeFrames(JSON.stringify(msg))) lanDc.send(f);
+      return lanDc.bufferedAmount;
+    }
+    if (conn && conn.open) { conn.send(msg); return conn.dataChannel ? conn.dataChannel.bufferedAmount : 0; }
+    if (lanDc && lanDc.readyState === 'open') {
+      for (const f of encodeFrames(JSON.stringify(msg))) lanDc.send(f);
+      return lanDc.bufferedAmount;
+    }
+    return -1;
+  },
   buffered() {
     if (active === 'lan') return lanDc && lanDc.readyState === 'open' ? lanDc.bufferedAmount : -1;
     return conn && conn.open && conn.dataChannel ? conn.dataChannel.bufferedAmount : -1;

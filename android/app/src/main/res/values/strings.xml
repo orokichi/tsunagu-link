@@ -2,5 +2,5 @@
     <string name="app_name">Quick Link</string>
     <string name="share_label">PC に送る</string>
     <string name="tile_label">クリップボードを PC へ</string>
-    <string name="a11y_desc">PC の「スマホ操作」から、このスマートフォンの画面を見ながらタップ・スワイプ・文字入力・戻る／ホームを使えるようにします。画面の内容は PC に表示するだけで、外部に保存しません。</string>
+    <string name="a11y_desc">PC の「スマホ操作」から、このスマートフォンの画面を見ながらタップ・スワイプ・文字入力・戻る／ホームを使えるようにします。画面の取得（スクリーンショット）にもこの許可を使うため、画面共有のたびに確認のダイアログは出ません。画面の内容は PC に表示するだけで、外部に保存しません。</string>
 </resources>

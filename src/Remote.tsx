@@ -87,7 +87,7 @@ export default function Remote() {
   const hover = (p: { x: number; y: number } | null) => {
     if (!p || !acc || !live) return
     const now = Date.now()
-    if (now - hoverAt.current < 140) return
+    if (now - hoverAt.current < 110) return
     hoverAt.current = now
     link.send({ t: 'rm_hover', x: p.x, y: p.y })
   }
@@ -103,7 +103,7 @@ export default function Remote() {
       if (dt > 650) link.send({ t: 'rm_long', x: p.x, y: p.y })
       else link.send({ t: 'rm_tap', x: p.x, y: p.y })
     } else {
-      link.send({ t: 'rm_swipe', x1: d.x, y1: d.y, x2: p.x, y2: p.y, ms: Math.min(1200, Math.max(90, dt)) })
+      link.send({ t: 'rm_swipe', x1: d.x, y1: d.y, x2: p.x, y2: p.y, ms: Math.min(1200, Math.max(60, dt)) })
     }
   }
   const wheel = (e: React.WheelEvent) => {
@@ -119,7 +119,7 @@ export default function Remote() {
       const dir = Math.abs(dy) > Math.abs(dx) ? (dy > 0 ? 'down' : 'up') : (dx > 0 ? 'right' : 'left')
       const p = norm(e as any) || { x: 0.5, y: 0.5 }
       link.send({ t: 'rm_scroll', dir, x: p.x, y: p.y })
-    }, 120)
+    }, 90)
   }
 
   /* ---------- keyboard → phone ---------- */
@@ -149,7 +149,7 @@ export default function Remote() {
     if (e.key.length === 1) {
       buffer.current += e.key
       if (flushTimer.current) window.clearTimeout(flushTimer.current)
-      flushTimer.current = window.setTimeout(flush, 260)
+      flushTimer.current = window.setTimeout(flush, 120)
       e.preventDefault()
     }
   }
@@ -206,11 +206,11 @@ export default function Remote() {
           {!hasFrame && (
             <div className="rp-blank">
               {r.mirror === 'requesting' ? (
-                <><span className="loader" /><b>スマホで「画面の共有を開始」を選んでください</b><span className="small muted">スマホに出ているダイアログで「今すぐ開始」を押すと、ここに画面が映ります。</span></>
+                <><span className="loader" /><b>{r.mode === 'projection' ? 'スマホで「画面の共有を開始」を選んでください' : '画面を取得しています…'}</b><span className="small muted">{r.mode === 'projection' ? 'スマホに出ているダイアログで「今すぐ開始」を押すと、ここに画面が映ります。' : 'ユーザー補助で取得しています。ダイアログは出ません。'}</span></>
               ) : r.mirror === 'denied' ? (
                 <><Icon n="block" /><b>画面共有が許可されませんでした</b><button className="btn filled" onClick={() => link.mirrorStart()}><Icon n="screen_share" />もう一度試す</button></>
               ) : (
-                <><Icon n="smartphone" /><b>画面はまだ映っていません</b><span className="small muted">「画面共有を開始」を押すと、スマホに許可のダイアログが出ます。ユーザー補助がオンなら、映った画面をそのまま操作できます。</span>
+                <><Icon n="smartphone" /><b>画面はまだ映っていません</b><span className="small muted">「画面共有を開始」を押すと、ユーザー補助がオンなら許可のダイアログを出さずにすぐ映ります。映った画面をそのまま操作できます。</span>
                   <button className="btn filled" onClick={() => link.mirrorStart()}><Icon n="screen_share" />画面共有を開始</button></>
               )}
             </div>
@@ -230,6 +230,14 @@ export default function Remote() {
               ? <button className="btn tonal" onClick={() => link.mirrorStop()}><Icon n="stop_circle" />停止</button>
               : <button className="btn filled" onClick={() => link.mirrorStart()} disabled={!s.via}><Icon n="screen_share" />画面共有を開始</button>}
           </div>
+          <div className="rp-side-row">
+            <span className="muted small">なめらかモード</span>
+            <button className="btn tonal" onClick={() => link.mirrorStart('projection')} disabled={!s.via}
+              title="MediaProjection で毎秒 15〜20 コマ。開始のたびにスマホで許可の確認が出ます">
+              <Icon n="high_quality" />{live && r.mode === 'projection' ? '使用中' : '許可して使う'}
+            </button>
+          </div>
+          {live && <p className="muted small">{r.mode === 'accessibility' ? 'ユーザー補助で取得中（ポップアップなし・Android の制限で毎秒 3 コマ程度）' : 'MediaProjection で取得中（なめらか）'}</p>}
           {r.w > 0 && <p className="muted small">スマホの解像度 {r.w} × {r.h} · 長辺 720px に縮小して JPEG で送信{live ? ` · 約 ${fps} fps` : ''}</p>}
           <div className="rp-side-row">
             <span className="muted small">キーボード</span>

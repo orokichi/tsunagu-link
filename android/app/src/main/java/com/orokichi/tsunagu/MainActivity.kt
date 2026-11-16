@@ -248,7 +248,7 @@ val PERMS = listOf(
     Perm(Icons.Rounded.MyLocation, "位置情報", "「探す」でスマホの現在地を PC の地図（OpenStreetMap）に表示", listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)),
     Perm(Icons.Rounded.LocationSearching, "位置情報（常に許可）", "アプリを開いていないときも「探す」で現在地を取得します", special = "location_always"),
     Perm(Icons.Rounded.TouchApp, "ユーザー補助（リモート操作）", "PC の「スマホ操作」からタップ・スワイプ・文字入力・戻る／ホームで操作します", special = "accessibility"),
-    Perm(Icons.Rounded.ScreenShare, "画面ミラーリング", "PC にスマホの画面をリアルタイムで表示します（開始のたびに許可の確認が出ます）", special = "projection"),
+    Perm(Icons.Rounded.ScreenShare, "画面ミラーリング", "PC にスマホの画面を表示します。ユーザー補助がオンなら、許可のダイアログを出さずにそのまま映ります（なめらかモードだけ毎回確認）", special = "projection"),
     Perm(Icons.Rounded.NotificationsActive, "アプリの通知", "受信ファイル・リンク・鳴らす機能の通知", listOf(Manifest.permission.POST_NOTIFICATIONS)),
     Perm(Icons.Rounded.BatterySaver, "バックグラウンドで常時接続", "電池の最適化を除外して接続を維持", special = "battery"),
     Perm(Icons.Rounded.OpenInNew, "リンクを直接開く", "PC から送ったリンクを即座に開く（他のアプリの上に表示）", special = "overlay"),

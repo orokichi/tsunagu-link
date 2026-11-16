@@ -4,6 +4,9 @@
 
   canPerformGestures        : taps, long presses, swipes and drags (dispatchGesture)
   canRetrieveWindowContent  : find the focused text field to type into it
+  canTakeScreenshot         : takeScreenshot() — the popup-free picture the PC
+                              mirror is built on (without this the platform
+                              refuses with a SecurityException)
   flagRetrieveInteractiveWindows : see the windows of other apps, so focus and
                               node searches work outside this app
   flagReportViewIds / flagIncludeNotImportantViews : reach fields that a
@@ -16,6 +19,7 @@
     android:accessibilityFlags="flagRetrieveInteractiveWindows|flagReportViewIds|flagIncludeNotImportantViews"
     android:canPerformGestures="true"
     android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
     android:description="@string/a11y_desc"
     android:notificationTimeout="120"
     android:settingsActivity="com.orokichi.tsunagu.MainActivity" />
