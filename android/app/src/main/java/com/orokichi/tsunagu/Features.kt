@@ -104,6 +104,7 @@ class Features(private val ctx: Context) {
             .put("carrier", tm?.networkOperatorName?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
             .put("storageFree", st.availableBytes).put("storageTotal", st.totalBytes).put("ringer", ringer)
             .put("lan", lanJson())
+            .put("sys", runCatching { SysControls.state(ctx) }.getOrNull() ?: JSONObject.NULL)
     }
 
     // ---------- notifications ----------

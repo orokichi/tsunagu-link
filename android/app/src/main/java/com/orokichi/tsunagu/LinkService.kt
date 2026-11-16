@@ -60,6 +60,12 @@ class LinkService : Service() {
         private val _via = MutableStateFlow("")
         val via: StateFlow<String> = _via
         @Volatile var lanPort: Int = 0
+        /** The connected PC as it describes itself (name, browser, OS, battery, online…). */
+        private val _pc = MutableStateFlow<JSONObject?>(null)
+        val pc: StateFlow<JSONObject?> = _pc
+        /** True while this phone is ringing the PC (「PC を鳴らす」). */
+        private val _pcRinging = MutableStateFlow(false)
+        val pcRinging: StateFlow<Boolean> = _pcRinging
         @Volatile var lastClip: String = ""
 
         fun start(c: Context) {
@@ -111,6 +117,21 @@ class LinkService : Service() {
         }
     }
 
+    // ---- Quick settings (rotation / ringer / DND / media volume) → PC ----
+    private var sysPushJob: Job? = null
+    private val sysReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) = scheduleSysPush()
+    }
+    private val rotationObserver = object : android.database.ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) = scheduleSysPush()
+    }
+    fun scheduleSysPush() {
+        if (!connected()) return
+        sysPushJob?.cancel()
+        sysPushJob = scope.launch { delay(250); sendSys() }
+    }
+    fun sendSys() { if (connected()) send(msg("sys", "sys" to SysControls.state(this))) }
+
     // ---- Realtime SMS/MMS: watch both providers and push fresh threads/history ----
     @Volatile private var watchedThread: String? = null
     private var smsPushJob: Job? = null
@@ -145,6 +166,16 @@ class LinkService : Service() {
         createWeb()
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(net)
         registerReceiver(battery, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        runCatching {
+            val f = IntentFilter().apply {
+                addAction("android.media.VOLUME_CHANGED_ACTION")
+                addAction(android.media.AudioManager.RINGER_MODE_CHANGED_ACTION)
+                addAction(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED)
+                addAction(NotificationManager.ACTION_NOTIFICATION_POLICY_ACCESS_GRANTED_CHANGED)
+            }
+            androidx.core.content.ContextCompat.registerReceiver(this, sysReceiver, f, androidx.core.content.ContextCompat.RECEIVER_EXPORTED)
+            contentResolver.registerContentObserver(android.provider.Settings.System.getUriFor(android.provider.Settings.System.ACCELEROMETER_ROTATION), false, rotationObserver)
+        }
         runCatching {
             contentResolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, smsObserver)
             contentResolver.registerContentObserver(Telephony.Mms.CONTENT_URI, true, smsObserver)
@@ -193,6 +224,9 @@ class LinkService : Service() {
         instance = null
         runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(net) }
         runCatching { unregisterReceiver(battery) }
+        runCatching { unregisterReceiver(sysReceiver) }
+        runCatching { contentResolver.unregisterContentObserver(rotationObserver) }
+        _pc.value = null; _pcRinging.value = false
         runCatching { contentResolver.unregisterContentObserver(smsObserver) }
         features.unwatchMedia()
         lanServer?.stop(); lanServer = null; lanPort = 0
@@ -223,6 +257,7 @@ class LinkService : Service() {
                 if (s == "closed" && activeVia == "lan") {
                     activeVia = null; _via.value = ""
                     infoJob?.cancel()
+                    _pc.value = null; _pcRinging.value = false
                     setStatus("connecting")
                     js("B.setActive('cloud')")
                 }
@@ -258,7 +293,7 @@ class LinkService : Service() {
         val v = when {
             s == "connected" -> "connected"
             s == "idle" -> "idle"
-            s == "disconnected" -> { infoJob?.cancel(); "connecting" }
+            s == "disconnected" -> { infoJob?.cancel(); _pc.value = null; _pcRinging.value = false; "connecting" }
             else -> if (_status.value == "connected" && s.startsWith("error")) "connecting" else "connecting"
         }
         if (v == _status.value) return
@@ -308,6 +343,7 @@ class LinkService : Service() {
                     WebPushStore.clearToken(this, previousToken)
                 }
                 Prefs.setToken(this, newToken, m.optString("pc", "PC"))
+                _pc.value = m.optJSONObject("pcInfo")
                 activeVia = via; _via.value = via
                 js("B.setActive(${JSONObject.quote(via)})")
                 withContext(Dispatchers.Main) { setStatus("connected"); refreshFg() }
@@ -353,7 +389,33 @@ class LinkService : Service() {
                     send(o)
                 }
                 "fs" -> sendFsList(m.optString("path"))
+                "sys" -> sendSys()
             }
+            // ---- quick settings from the PC ----
+            "sys_set" -> {
+                val err = when (m.optString("key")) {
+                    "rotate" -> SysControls.setRotate(this, m.optBoolean("on"))
+                    "ringer" -> SysControls.setRinger(this, m.optString("mode"))
+                    "dnd" -> SysControls.setDnd(this, m.optBoolean("on"))
+                    "vol" -> SysControls.setVolume(this, m.optInt("value"))
+                    "vol_step" -> SysControls.stepVolume(this, m.optInt("dir", 1))
+                    "mute" -> SysControls.setMute(this, m.optBoolean("on"))
+                    else -> null
+                }
+                if (err != null) send(msg("sys_err", "text" to err, "sys" to SysControls.state(this)))
+                else { delay(150); sendSys() }
+            }
+            "sys_perm" -> withContext(Dispatchers.Main) {
+                val intent = when (m.optString("which")) {
+                    "write_settings" -> Intent(android.provider.Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:$packageName"))
+                    else -> Intent(android.provider.Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+                }
+                val ok = runCatching { startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); true }.getOrDefault(false)
+                toast(if (ok) "スマホで許可してください（許可後、自動で反映されます）" else "設定画面を開けませんでした")
+            }
+            // ---- the PC describes itself / reports its ring state ----
+            "pc_info" -> _pc.value = m.optJSONObject("info")
+            "pc_ring_state" -> _pcRinging.value = m.optBoolean("on")
             "mark_read" -> {
                 val tid = m.optString("threadId")
                 if (tid.isNotEmpty()) {
@@ -435,6 +497,16 @@ class LinkService : Service() {
     }
 
     fun toast(text: String) = send(msg("toast", "text" to text))
+
+    // ---------------- Phone → PC actions (the PC screen in the app) ----------------
+    fun pcOpenUrl(url: String) {
+        val u = url.trim().let { if (it.startsWith("http://") || it.startsWith("https://")) it else "https://$it" }
+        send(msg("pc_open", "url" to u))
+    }
+    fun pcText(text: String) { if (text.isNotBlank()) send(msg("pc_text", "text" to text)) }
+    fun pcPing(text: String) = send(msg("pc_ping", "text" to text.ifBlank { "スマホから呼び出しがあります" }))
+    fun pcRing(on: Boolean) { _pcRinging.value = on; send(msg("pc_ring", "on" to on)) }
+    fun pcRefresh() = send(msg("pc_get"))
 
     fun sendInfo() { if (connected()) send(msg("info", "info" to features.info())) }
 

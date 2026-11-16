@@ -15,7 +15,7 @@
  *     notification is stored in IndexedDB ("offline outbox", shared with the
  *     page) and sent by the page the next time it connects.
  */
-const CACHE = 'tsunagu-shell-v4'
+const CACHE = 'tsunagu-shell-v5'
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon.svg',
   '/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-maskable-512.png', '/apple-touch-icon.png']
 
@@ -134,6 +134,10 @@ self.addEventListener('notificationclick', (event) => {
   const fromPush = !!(n.data && n.data.push)
   const action = event.action || ''
   n.close()
+  // A link sent from the phone ("PC で開く") whose tab could not be opened
+  // directly (popup blocked): the notification click carries the user
+  // activation needed to open it.
+  if (n.data && n.data.url) { event.waitUntil(self.clients.openWindow(n.data.url).catch(() => {})); return }
   event.waitUntil((async () => {
     const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
     const win = wins[0]

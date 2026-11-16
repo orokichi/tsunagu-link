@@ -5,6 +5,17 @@ export type Via = 'lan' | 'cloud'
 export interface Device { name: string; model: string; android: string }
 export interface Info { battery: number; charging: boolean; net: string; carrier?: string; storageFree: number; storageTotal: number; ringer?: string; lan?: LanEps }
 export interface LanEps { ips: string[]; port: number }
+/** Phone system controls reported by the app (クイック設定). */
+export interface Sys {
+  rotate: boolean | null; canWrite: boolean
+  ringer: 'normal' | 'vibrate' | 'silent'; dnd: boolean; dndAccess: boolean
+  vol: number; volMax: number; volMin?: number; muted: boolean
+}
+/** What this PC reports about itself to the phone (bidirectional link). */
+export interface PcInfo {
+  name: string; browser: string; os: string; battery: number | null; charging: boolean | null
+  online: boolean; visible: boolean; screen: string; lang: string; pwa: boolean
+}
 export interface Notif { key: string; app: string; pkg: string; title: string; text: string; time: number; icon?: string; reply?: boolean; actions?: string[] }
 export interface Media { app: string; title: string; artist: string; playing: boolean; art?: string; position?: number; duration?: number }
 export interface Thread { id: string; address: string; name?: string; snippet: string; time: number; unread?: boolean; unreadCount?: number; kind?: 'sms' | 'rcs' | 'mms' }
@@ -31,6 +42,11 @@ export interface State {
   pending?: { name: string; accept: () => void; reject: () => void }
   incomingCall?: { number: string; name?: string } | null
   focusNotif?: string
+  sys?: Sys | null
+  /** The phone is ringing this PC (「PC を鳴らす」). */
+  ringing: boolean
+  /** Text the phone sent to this PC (「PC にテキストを送る」). */
+  inbox?: { text: string; time: number } | null
 }
 
 const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -41,7 +57,7 @@ const ls = {
   del: (k: string) => localStorage.removeItem('ts.' + k),
 }
 const CHUNK = 48 * 1024
-export const APP_VERSION = '1.0.6'
+export const APP_VERSION = '1.1.0'
 
 function b64(buf: ArrayBuffer) {
   const u = new Uint8Array(buf); let s = ''
@@ -243,7 +259,7 @@ class Link {
     if (!code) { code = rand(6); ls.set('code', code) }
     if (!secret) { secret = rand(20); ls.set('secret', secret) }
     const focusNotif = new URLSearchParams(location.search).get('notif') || undefined
-    this.state = { status: 'starting', code, secret, pushState: pushSupported() ? (ls.get('push') === '1' ? 'on' : 'off') : 'unsupported', pushSynced: false, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false }
+    this.state = { status: 'starting', code, secret, pushState: pushSupported() ? (ls.get('push') === '1' ? 'on' : 'off') : 'unsupported', pushSynced: false, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false, ringing: false }
     this.start()
     // If we already know the phone's LAN endpoints (learned during a previous
     // pairing), try the direct route right away; keep retrying while offline
@@ -265,8 +281,109 @@ class Link {
     void this.refreshPushState()
     void this.drainOfflineQueue()
     window.addEventListener('focus', () => this.pushClipboard(false))
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) this.pushClipboard(false) })
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) this.pushClipboard(false); this.queuePcInfo() })
+    window.addEventListener('online', () => this.queuePcInfo())
+    window.addEventListener('offline', () => this.queuePcInfo())
+    // Browsers only allow audio after a user gesture: unlock the ring sound on
+    // the first interaction so the phone can ring this PC later.
+    const unlock = () => { this.audio(); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock) }
+    window.addEventListener('pointerdown', unlock)
+    window.addEventListener('keydown', unlock)
+    ;(navigator as any).getBattery?.().then((b: any) => {
+      this.battery = b
+      b.addEventListener('levelchange', () => this.queuePcInfo())
+      b.addEventListener('chargingchange', () => this.queuePcInfo())
+    }).catch(() => {})
   }
+
+  // ---------------- This PC, as seen from the phone ----------------
+  private battery?: { level: number; charging: boolean }
+  private pcInfoTimer?: number
+  pcInfo(): PcInfo {
+    const ua = navigator.userAgent
+    const browser = /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'ブラウザ'
+    const os = /CrOS/.test(ua) ? 'ChromeOS' : /Windows/.test(ua) ? 'Windows' : /Mac OS X|Macintosh/.test(ua) ? 'macOS' : /Android/.test(ua) ? 'Android' : /Linux/.test(ua) ? 'Linux' : 'PC'
+    const name = os === 'ChromeOS' ? 'Chromebook' : os === 'Windows' ? 'Windows PC' : os === 'macOS' ? 'Mac' : os === 'Linux' ? 'Linux PC' : 'PC'
+    const b = this.battery
+    return {
+      name, browser, os,
+      battery: b ? Math.round(b.level * 100) : null, charging: b ? b.charging : null,
+      online: navigator.onLine, visible: !document.hidden,
+      screen: `${screen.width}×${screen.height}`, lang: navigator.language,
+      pwa: matchMedia('(display-mode: standalone)').matches,
+    }
+  }
+  private queuePcInfo() {
+    if (!this.conn?.open) return
+    clearTimeout(this.pcInfoTimer)
+    this.pcInfoTimer = window.setTimeout(() => this.send({ t: 'pc_info', info: this.pcInfo() }), 400)
+  }
+
+  // ---------------- Ring this PC (phone → PC) ----------------
+  private ctx?: AudioContext
+  private ringTimer?: number
+  private ringStop?: number
+  private audio() {
+    try {
+      if (!this.ctx) this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)()
+      if (this.ctx.state === 'suspended') void this.ctx.resume()
+    } catch {}
+    return this.ctx
+  }
+  private beep() {
+    const ctx = this.audio(); if (!ctx) return
+    const t0 = ctx.currentTime
+    for (const [i, f] of [880, 1320, 880, 1320].entries()) {
+      const o = ctx.createOscillator(), g = ctx.createGain()
+      o.type = 'sine'; o.frequency.value = f
+      const t = t0 + i * 0.18
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.35, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16)
+      o.connect(g).connect(ctx.destination); o.start(t); o.stop(t + 0.17)
+    }
+  }
+  startRing() {
+    this.stopRing(false)
+    this.set({ ringing: true })
+    this.beep()
+    this.ringTimer = window.setInterval(() => this.beep(), 1200)
+    this.ringStop = window.setTimeout(() => this.stopRing(), 30000)
+    this.notify('スマホから呼び出し中', 'Tsunagu のタブで「停止」を押すと止まります', { key: 'tsunagu-ring' }, true)
+    this.send({ t: 'pc_ring_state', on: true })
+  }
+  stopRing(report = true) {
+    clearInterval(this.ringTimer); clearTimeout(this.ringStop)
+    this.ringTimer = undefined; this.ringStop = undefined
+    if (this.state.ringing) this.set({ ringing: false })
+    if (report) this.send({ t: 'pc_ring_state', on: false })
+  }
+
+  /** Open a link the phone sent. Popup blockers may refuse a tab opened
+   *  without a click, so fall back to a toast button and a notification
+   *  whose click opens it. */
+  private openFromPhone(url: string) {
+    if (!/^https?:\/\//i.test(url)) return
+    let w: Window | null = null
+    try { w = window.open(url, '_blank') } catch {}
+    if (w) { try { w.opener = null } catch {} this.toast('スマホから送られたリンクを開きました'); return }
+    this.toast('スマホからリンクが届きました', { label: '開く', run: () => window.open(url, '_blank', 'noopener') })
+    this.notify('スマホからのリンク', url, { url }, true)
+  }
+  clearInbox() { this.set({ inbox: null }) }
+
+  // ---------------- Phone quick settings (PC → phone) ----------------
+  setSys(p: Record<string, unknown>) {
+    this.send({ t: 'sys_set', ...p })
+    // Optimistic UI; the phone answers with the authoritative state.
+    const s = this.state.sys; if (!s) return
+    const next = { ...s }
+    if (p.key === 'rotate') next.rotate = !!p.on
+    else if (p.key === 'dnd') next.dnd = !!p.on
+    else if (p.key === 'ringer') next.ringer = p.mode as Sys['ringer']
+    else if (p.key === 'vol') { next.vol = Number(p.value); next.muted = false }
+    else if (p.key === 'mute') next.muted = !!p.on
+    this.set({ sys: next })
+  }
+  sysPerm(which: 'write_settings' | 'dnd') { this.send({ t: 'sys_perm', which }); this.toast('スマホで許可画面を開きました') }
 
   subscribe = (f: () => void) => { this.subs.add(f); return () => { this.subs.delete(f) } }
   get = () => this.state
@@ -309,7 +426,8 @@ class Link {
     if (this.pendingLan === t) { this.pendingLan = undefined; return }
     if (this.conn === t) {
       this.conn = undefined
-      this.set({ status: 'waiting', via: undefined, media: undefined, incomingCall: null, pushSynced: false })
+      this.set({ status: 'waiting', via: undefined, media: undefined, incomingCall: null, pushSynced: false, sys: null })
+      this.stopRing(false)
       this.toast('スマートフォンとの接続が切れました')
       setTimeout(() => this.tryLan(), 3000)
     }
@@ -322,13 +440,14 @@ class Link {
     let token = hello.token
     const trusted: string[] = JSON.parse(ls.get('trusted') || '[]')
     if (!trusted.includes(token)) { token = rand(24); trusted.push(token); ls.set('trusted', JSON.stringify(trusted.slice(-10))) }
-    c.send({ t: 'welcome', token, pc: navigator.userAgent.includes('Windows') ? 'Windows PC' : 'PC' })
+    const me = this.pcInfo()
+    c.send({ t: 'welcome', token, pc: me.name, pcInfo: me })
     this.pcToken = token
     if (hello.vapid) this.vapid = hello.vapid
     if (hello.seed) ls.set('seed', hello.seed)
     this.learnLan(hello.lan)
     this.set({ status: 'connected', via: c.kind, device: { name: hello.name, model: hello.model, android: hello.android }, seed: hello.seed || this.state.seed, pending: undefined })
-    for (const what of ['info', 'notifs', 'media', 'threads', 'calls']) this.send({ t: 'get', what })
+    for (const what of ['info', 'notifs', 'media', 'threads', 'calls', 'sys']) this.send({ t: 'get', what })
     this.getPhotos(true)
     // (Re)register the Web Push subscription with this pairing and flush any
     // replies that were queued while the page was closed.
@@ -521,8 +640,8 @@ class Link {
     setTimeout(() => { if (this.pendingLan === t) { this.pendingLan = undefined; t.close() } }, 8000)
   }
 
-  private notify(title: string, body: string, rich?: { key?: string; reply?: boolean; actions?: string[]; icon?: string }) {
-    if (document.hasFocus() || !('Notification' in window) || Notification.permission !== 'granted') return
+  private notify(title: string, body: string, rich?: { key?: string; reply?: boolean; actions?: string[]; icon?: string; url?: string }, always = false) {
+    if ((!always && document.hasFocus()) || !('Notification' in window) || Notification.permission !== 'granted') return
     const icon = rich?.icon ? 'data:image/png;base64,' + rich.icon : '/icons/icon-192.png'
     // Prefer the service worker: only SW notifications can carry action buttons
     // and the inline text reply (used e.g. to answer LINE without opening the app).
@@ -537,7 +656,7 @@ class Link {
       }
       await reg.showNotification(title, {
         body, icon, tag: rich?.key, renotify: !!rich?.key,
-        data: { key: rich?.key || '' },
+        data: { key: rich?.url ? '' : rich?.key || '', url: rich?.url },
         actions: actions.length ? actions : undefined,
       } as NotificationOptions)
     }
@@ -559,7 +678,26 @@ class Link {
     if (c !== this.conn) return
     const s = this.state
     switch (m.t) {
-      case 'info': this.set({ info: m.info }); this.learnLan(m.info?.lan); break
+      case 'info': this.set({ info: m.info, ...(m.info?.sys ? { sys: m.info.sys } : {}) }); this.learnLan(m.info?.lan); break
+      case 'sys': this.set({ sys: m.sys }); break
+      case 'sys_err': this.toast(m.text || '操作できませんでした'); if (m.sys) this.set({ sys: m.sys }); break
+      // ---- phone → PC ----
+      case 'pc_get': this.send({ t: 'pc_info', info: this.pcInfo() }); break
+      case 'pc_open': this.openFromPhone(String(m.url || '')); break
+      case 'pc_ping': {
+        const text = String(m.text || 'スマホから呼び出しがあります')
+        this.toast(`${s.device?.name || 'スマホ'}: ${text}`)
+        this.notify(s.device?.name || 'スマホ', text, { key: 'tsunagu-ping-' + Date.now() }, true)
+        break
+      }
+      case 'pc_ring': if (m.on === false) this.stopRing(); else this.startRing(); break
+      case 'pc_text': {
+        const text = String(m.text || ''); if (!text) break
+        this.lastClip = text
+        this.set({ inbox: { text, time: Date.now() }, clips: this.addClip({ text, time: Date.now(), from: 'phone' }) })
+        this.notify('スマホからテキスト', text, { key: 'tsunagu-text' })
+        break
+      }
       case 'push_state': {
         if (m.subscribed) { if (m.endpoint) this.pushEndpoint = m.endpoint; this.set({ pushState: 'on', pushSynced: true }) }
         else this.set({ pushSynced: false })

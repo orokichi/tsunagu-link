@@ -58,7 +58,7 @@ function Pairing() {
       <section className="pair-hero">
         <Cookie lobes={s.status === 'waiting' ? 9 : 6} className={'big spin ' + s.status}><Icon n="devices" fill /></Cookie>
         <h1>PC とスマホを、<br />ひとつに。</h1>
-        <p className="lead">通知・メッセージ・通話・写真・Quick Share・クリップボードを、このブラウザからそのまま扱えます。</p>
+        <p className="lead">通知・メッセージ・通話・写真・ファイル共有・クリップボードを、このブラウザからそのまま扱えます。スマホからもこの PC にファイルやリンクを送れます。</p>
         <ol className="steps">
           <li><span>1</span><div><b>Android アプリを入れる</b><a className="btn tonal" href={APK_URL} target="_blank" rel="noreferrer"><Icon n="android" />APK をダウンロード</a></div></li>
           <li><span>2</span><div><b>アプリで「PC とつなぐ」</b>右の QR をスキャン、またはコードを入力（コードの入力は初回だけです）</div></li>
@@ -98,51 +98,68 @@ function RingButton({ className = 'btn filled' }: { className?: string }) {
   )
 }
 
-/* ---------- Home ---------- */
+/* ---------- Home (dashboard) ---------- */
+function useMedia(q: string) {
+  const [m, setM] = useState(() => matchMedia(q).matches)
+  useEffect(() => { const mq = matchMedia(q); const f = () => setM(mq.matches); mq.addEventListener('change', f); f(); return () => mq.removeEventListener('change', f) }, [q])
+  return m
+}
+
 function Home({ go }: { go: (v: string) => void }) {
   const s = useLink()
   const i = s.info
   const [url, setUrl] = useState('')
   return (
-    <div className="grid home">
-      <section className="card hero-device">
+    <div className="dash">
+      <section className="card hero-device a-hero">
         <Cookie lobes={12} className="spin slow"><Icon n="smartphone" fill /></Cookie>
-        <div>
+        <div className="hero-text">
           <div className="overline">接続中</div>
-          <h2>{s.device?.name}</h2>
+          <h2 className="display">{s.device?.name}</h2>
           <div className="muted">{s.device?.model} · Android {s.device?.android}</div>
-          <div className={'via-chip ' + (s.via || '')}><Icon n={s.via === 'lan' ? 'wifi' : 'cloud'} />{s.via === 'lan' ? '同じネットワークで接続中（直接接続）' : 'クラウド経由で接続中'}</div>
+          <div className="hero-chips">
+            <span className={'via-chip ' + (s.via || '')}><Icon n={s.via === 'lan' ? 'wifi' : 'cloud'} />{s.via === 'lan' ? '同じネットワークで直接接続' : 'クラウド経由で接続'}</span>
+            {i?.ringer && <span className="via-chip"><Icon n={s.sys?.ringer === 'silent' ? 'notifications_off' : s.sys?.ringer === 'vibrate' ? 'vibration' : 'notifications_active'} />{i.ringer}</span>}
+          </div>
         </div>
-        <div className="stats">
-          <Stat icon={i?.charging ? 'battery_charging_full' : 'battery_horiz_075'} label="バッテリー" value={i ? i.battery + '%' : '—'} meter={i ? i.battery / 100 : 0} />
+        <div className="hero-actions"><RingButton className="btn filled big" /></div>
+      </section>
+
+      <section className="card battery-card a-battery">
+        <Gauge value={i ? i.battery / 100 : 0} label={i ? i.battery + '%' : '—'} charging={!!i?.charging} />
+        <div className="battery-meta">
+          <b>{i?.charging ? '充電中' : 'バッテリー'}</b>
           <Stat icon="signal_cellular_alt" label={i?.carrier || 'ネットワーク'} value={i?.net || '—'} />
           <Stat icon="hard_drive" label="空き容量" value={i ? fmtSize(i.storageFree) : '—'} meter={i ? 1 - i.storageFree / i.storageTotal : 0} />
         </div>
       </section>
 
-      <section className="card actions">
+      <QuickSettings />
+
+      <MediaCard />
+
+      <section className="card actions a-actions">
         <h3>クイック操作</h3>
-        <div className="btn-group">
-          <RingButton />
-          <button className="btn tonal" onClick={() => link.pushClipboard(true)}><Icon n="content_paste_go" />クリップボード送信</button>
-          <label className="btn tonal"><Icon n="nearby" />Quick Share で送信<input type="file" multiple hidden onChange={(e) => e.target.files && link.sendFiles(e.target.files)} /></label>
+        <div className="action-grid">
+          <label className="action-tile"><span className="at-icon"><Icon n="share" fill /></span><b>ファイル共有</b><span className="muted small">スマホに送る</span><input type="file" multiple hidden onChange={(e) => { if (e.target.files) link.sendFiles(e.target.files); e.target.value = '' }} /></label>
+          <button className="action-tile" onClick={() => link.pushClipboard(true)}><span className="at-icon"><Icon n="content_paste_go" /></span><b>クリップボード</b><span className="muted small">スマホに送る</span></button>
+          <button className="action-tile" onClick={() => go('find')}><span className="at-icon"><Icon n="location_on" /></span><b>探す</b><span className="muted small">地図で表示</span></button>
+          <button className="action-tile" onClick={() => go('explorer')}><span className="at-icon"><Icon n="folder_open" /></span><b>ファイル</b><span className="muted small">ストレージを開く</span></button>
         </div>
         <form className="url" onSubmit={(e) => { e.preventDefault(); if (url) { link.send({ t: 'open_url', url: /^https?:/.test(url) ? url : 'https://' + url }); setUrl(''); link.toast('スマホにリンクを送りました') } }}>
           <Icon n="link" /><input placeholder="スマホで開くリンク" value={url} onChange={(e) => setUrl(e.target.value)} /><button className="icon-btn filled" aria-label="送信"><Icon n="send" /></button>
         </form>
       </section>
 
-      <MediaCard />
-
-      <section className="card list-card">
+      <section className="card list-card a-notifs">
         <header><h3>最近の通知</h3><button className="btn text" onClick={() => go('notifs')}>すべて</button></header>
-        {s.notifs.slice(0, 4).map((n) => <NotifRow key={n.key} n={n} compact />)}
+        {s.notifs.slice(0, 5).map((n) => <NotifRow key={n.key} n={n} compact />)}
         {!s.notifs.length && <Empty icon="notifications_off" text="通知はありません" />}
       </section>
 
-      <section className="card list-card wide">
+      <section className="card list-card a-photos">
         <header><h3>最近の写真</h3><button className="btn text" onClick={() => go('photos')}>すべて</button></header>
-        <div className="strip">{s.photos.slice(0, 10).map((p) => <Thumb key={p.id} p={p} />)}</div>
+        <div className="strip">{s.photos.slice(0, 14).map((p) => <Thumb key={p.id} p={p} />)}</div>
         {!s.photos.length && <Empty icon="photo_library" text="写真へのアクセスを許可すると表示されます" />}
       </section>
     </div>
@@ -153,20 +170,83 @@ const Stat = ({ icon, label, value, meter }: { icon: string; label: string; valu
 )
 const Empty = ({ icon, text }: { icon: string; text: string }) => <div className="empty"><Icon n={icon} /><span>{text}</span></div>
 
-function MediaCard() {
-  const m = useLink().media
-  if (!m) return <section className="card media empty-media"><Icon n="music_off" /><span className="muted">再生中のメディアはありません</span></section>
+/** Expressive circular gauge (wavy when charging). */
+function Gauge({ value, label, charging }: { value: number; label: string; charging: boolean }) {
+  const r = 52, c = 2 * Math.PI * r, v = Math.max(0, Math.min(1, value))
   return (
-    <section className="card media">
-      <div className="art">{m.art ? <img src={'data:image/jpeg;base64,' + m.art} alt="" /> : <Icon n="music_note" />}</div>
-      <div className="meta"><div className="overline">{m.app}</div><b>{m.title}</b><span className="muted">{m.artist}</span>
-        <Wavy value={m.duration ? (m.position || 0) / m.duration : 0} active={m.playing} />
-        <div className="controls">
-          <button className="icon-btn" onClick={() => link.send({ t: 'media_cmd', cmd: 'prev' })}><Icon n="skip_previous" fill /></button>
-          <button className={'play ' + (m.playing ? 'on' : '')} onClick={() => link.send({ t: 'media_cmd', cmd: m.playing ? 'pause' : 'play' })}><Icon n={m.playing ? 'pause' : 'play_arrow'} fill /></button>
-          <button className="icon-btn" onClick={() => link.send({ t: 'media_cmd', cmd: 'next' })}><Icon n="skip_next" fill /></button>
+    <div className={'gauge' + (charging ? ' charging' : '') + (v <= 0.15 ? ' low' : '')}>
+      <svg viewBox="0 0 128 128"><circle className="g-track" cx="64" cy="64" r={r} /><circle className="g-fill" cx="64" cy="64" r={r} strokeDasharray={`${c * v} ${c}`} /></svg>
+      <div className="g-in"><Icon n={charging ? 'bolt' : 'battery_horiz_075'} fill /><b>{label}</b></div>
+    </div>
+  )
+}
+
+/** Phone quick settings: auto-rotate, ringer mode and Do Not Disturb. */
+function QuickSettings() {
+  const sys = useLink().sys
+  const ringer = sys?.ringer || 'normal'
+  return (
+    <section className="card qs a-toggles">
+      <header className="qs-h"><h3>スマホのクイック設定</h3>{!sys && <span className="muted small">アプリを v1.1.0 に更新すると使えます</span>}</header>
+      <div className="qs-tiles">
+        <Tile icon="screen_rotation" label="自動回転" on={!!sys?.rotate} state={sys?.rotate == null ? '—' : sys.rotate ? 'オン' : 'オフ'}
+          disabled={!sys || !sys.canWrite} onClick={() => link.setSys({ key: 'rotate', on: !sys?.rotate })} />
+        <Tile icon={sys?.dnd ? 'do_not_disturb_on' : 'do_not_disturb_off'} label="サイレント" on={!!sys?.dnd} state={sys?.dnd ? 'オン（優先のみ）' : 'オフ'}
+          disabled={!sys || !sys.dndAccess} onClick={() => link.setSys({ key: 'dnd', on: !sys?.dnd })} />
+      </div>
+      <div className="ringer-seg" role="radiogroup" aria-label="着信モード">
+        {([['normal', '着信音', 'notifications_active'], ['vibrate', 'バイブ', 'vibration'], ['silent', 'ミュート', 'notifications_off']] as const).map(([k, l, ic]) => (
+          <button key={k} role="radio" aria-checked={ringer === k} className={ringer === k ? 'on' : ''} disabled={!sys || ((k === 'silent' || ringer === 'silent') && !sys.dndAccess)}
+            onClick={() => link.setSys({ key: 'ringer', mode: k })}><Icon n={ic} fill={ringer === k} />{l}</button>
+        ))}
+      </div>
+      {sys && !sys.canWrite && <PermHint text="自動回転の切り替えには、スマホで「システム設定の変更」の許可が必要です" onClick={() => link.sysPerm('write_settings')} />}
+      {sys && !sys.dndAccess && <PermHint text="サイレント・ミュートの切り替えには、スマホで「サイレントモードへのアクセス」の許可が必要です" onClick={() => link.sysPerm('dnd')} />}
+    </section>
+  )
+}
+const Tile = ({ icon, label, state, on, disabled, onClick }: { icon: string; label: string; state: string; on: boolean; disabled?: boolean; onClick: () => void }) => (
+  <button className={'tile' + (on ? ' on' : '')} disabled={disabled} onClick={onClick} aria-pressed={on}>
+    <span className="tile-icon"><Icon n={icon} fill={on} /></span><span className="tile-text"><b>{label}</b><span className="small">{disabled ? '未許可' : state}</span></span>
+  </button>
+)
+const PermHint = ({ text, onClick }: { text: string; onClick: () => void }) => (
+  <div className="perm-hint"><Icon n="lock" /><span className="small">{text}</span><button className="btn text" onClick={onClick}>スマホで許可</button></div>
+)
+
+function MediaCard() {
+  const s = useLink()
+  const m = s.media, sys = s.sys
+  const [drag, setDrag] = useState<number | null>(null)
+  const vol = drag ?? sys?.vol ?? 0
+  const max = sys?.volMax || 15
+  const volume = sys && (
+    <div className="volume">
+      <button className="icon-btn" title={sys.muted ? 'ミュート解除' : 'ミュート'} onClick={() => link.setSys({ key: 'mute', on: !sys.muted })}><Icon n={sys.muted || vol === 0 ? 'volume_off' : vol < max / 2 ? 'volume_down' : 'volume_up'} fill /></button>
+      <button className="icon-btn sm" title="音量を下げる" onClick={() => link.setSys({ key: 'vol_step', dir: -1 })}><Icon n="remove" /></button>
+      <input type="range" className="slider" min={sys.volMin ?? 0} max={max} step={1} value={sys.muted ? 0 : vol} aria-label="メディアの音量"
+        style={{ '--p': ((sys.muted ? 0 : vol) / max) * 100 + '%' } as React.CSSProperties}
+        onChange={(e) => { const v = +e.target.value; setDrag(v); link.setSys({ key: 'vol', value: v }) }}
+        onPointerUp={() => setDrag(null)} onKeyUp={() => setDrag(null)} onBlur={() => setDrag(null)} />
+      <button className="icon-btn sm" title="音量を上げる" onClick={() => link.setSys({ key: 'vol_step', dir: 1 })}><Icon n="add" /></button>
+      <span className="vol-num">{sys.muted ? 0 : vol}<span className="muted">/{max}</span></span>
+    </div>
+  )
+  if (!m) return <section className="card media empty-media a-media"><Icon n="music_off" /><span className="muted">再生中のメディアはありません</span>{volume}</section>
+  return (
+    <section className={'card media a-media' + (m.playing ? ' playing' : '')}>
+      <div className="media-main">
+        <div className="art">{m.art ? <img src={'data:image/jpeg;base64,' + m.art} alt="" /> : <Icon n="music_note" />}</div>
+        <div className="meta"><div className="overline">再生中 · {m.app}</div><b>{m.title}</b><span className="muted">{m.artist}</span>
+          <Wavy value={m.duration ? (m.position || 0) / m.duration : 0} active={m.playing} />
+          <div className="controls">
+            <button className="icon-btn" onClick={() => link.send({ t: 'media_cmd', cmd: 'prev' })}><Icon n="skip_previous" fill /></button>
+            <button className={'play ' + (m.playing ? 'on' : '')} onClick={() => link.send({ t: 'media_cmd', cmd: m.playing ? 'pause' : 'play' })}><Icon n={m.playing ? 'pause' : 'play_arrow'} fill /></button>
+            <button className="icon-btn" onClick={() => link.send({ t: 'media_cmd', cmd: 'next' })}><Icon n="skip_next" fill /></button>
+          </div>
         </div>
       </div>
+      {volume}
     </section>
   )
 }
@@ -193,12 +273,33 @@ function NotifRow({ n, compact, autoReply }: { n: import('./link').Notif; compac
     </div>
   )
 }
+function NotifDetail({ n }: { n: import('./link').Notif }) {
+  const [reply, setReply] = useState('')
+  return (
+    <div className="detail notif-detail" key={n.key}>
+      <div className="detail-head">
+        <div className="avatar xl">{n.icon ? <img src={'data:image/png;base64,' + n.icon} alt="" /> : <Icon n="notifications" />}</div>
+        <div><div className="overline">{n.app}</div><div className="muted small">{new Date(n.time).toLocaleString('ja-JP')}</div></div>
+        <button className="icon-btn" title="消去" onClick={() => link.send({ t: 'notif_dismiss', key: n.key })}><Icon n="delete" /></button>
+      </div>
+      <h2 className="display-s">{n.title}</h2>
+      <p className="detail-body">{n.text}</p>
+      {!!n.actions?.length && <div className="chips">{n.actions.map((a, i) => <button key={i} className="chip-btn" onClick={() => link.send({ t: 'notif_action', key: n.key, index: i })}>{a}</button>)}</div>}
+      {n.reply && <form className="composer" onSubmit={(e) => { e.preventDefault(); if (reply) { link.send({ t: 'notif_reply', key: n.key, text: reply }); setReply('') } }}>
+        <input autoFocus value={reply} onChange={(e) => setReply(e.target.value)} placeholder={`${n.app} に返信`} /><button className="icon-btn filled big"><Icon n="send" fill /></button></form>}
+    </div>
+  )
+}
 function Notifs() {
   const s = useLink()
+  const wide = useMedia('(min-width: 1000px)')
+  const [sel, setSel] = useState<string | null>(null)
+  useEffect(() => { if (s.focusNotif && wide) { setSel(s.focusNotif); link.clearFocusNotif() } }, [s.focusNotif, wide])
+  const cur = s.notifs.find((n) => n.key === sel) || (wide ? s.notifs[0] : undefined)
   const perm = typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'
   return (
     <div className="pane">
-      <header className="pane-h"><h2>通知</h2>
+      <header className="pane-h"><h2 className="display-s">通知</h2>
         {perm === 'default' && <button className="btn tonal" onClick={() => Notification.requestPermission()}><Icon n="notifications_active" />ブラウザ通知を有効化</button>}
         {perm === 'denied' && <span className="muted small">ブラウザ通知がブロックされています（ブラウザの設定から許可してください）</span>}
         {s.pushState === 'unsupported' && <span className="muted small">このブラウザは「閉じていても通知」（Web Push）に対応していません</span>}
@@ -208,7 +309,20 @@ function Notifs() {
         {s.pushState === 'on' && <span className="muted small">閉じていても通知: 有効{s.pushSynced ? '（スマホに登録済み）' : '（スマホ接続時に登録します）'}</span>}
         {s.pushState === 'on' && <button className="btn tonal" onClick={() => link.disablePush()}>Pushを無効化</button>}
         <button className="btn tonal" onClick={() => link.send({ t: 'notif_dismiss', key: '*' })}><Icon n="clear_all" />すべて消去</button></header>
-      <div className="card list-card">{s.notifs.map((n) => <NotifRow key={n.key} n={n} autoReply={s.focusNotif === n.key} />)}{!s.notifs.length && <Empty icon="notifications_off" text="通知はありません（アプリで通知へのアクセスを許可してください）" />}</div>
+      {wide ? (
+        <div className="two-pane">
+          <div className="card list-card pane-list">
+            {s.notifs.map((n) => <button key={n.key} className={'thread notif-item' + (cur?.key === n.key ? ' sel' : '')} onClick={() => setSel(n.key)}>
+              <div className="avatar">{n.icon ? <img src={'data:image/png;base64,' + n.icon} alt="" /> : <Icon n="notifications" />}</div>
+              <div className="body"><div className="row"><span className="muted small">{n.app}</span><span className="muted small">{fmtTime(n.time)}</span></div><b>{n.title}</b><p className="muted">{n.text}</p></div>
+            </button>)}
+            {!s.notifs.length && <Empty icon="notifications_off" text="通知はありません（アプリで通知へのアクセスを許可してください）" />}
+          </div>
+          <div className="card pane-detail">{cur ? <NotifDetail n={cur} /> : <Empty icon="notifications" text="通知を選択してください" />}</div>
+        </div>
+      ) : (
+        <div className="card list-card">{s.notifs.map((n) => <NotifRow key={n.key} n={n} autoReply={s.focusNotif === n.key} />)}{!s.notifs.length && <Empty icon="notifications_off" text="通知はありません（アプリで通知へのアクセスを許可してください）" />}</div>
+      )}
     </div>
   )
 }
@@ -232,9 +346,9 @@ function Messages() {
     link.sendSms(addr, text, sel); setText('')
   }
   return (
-    <div className="pane split">
+    <div className={'pane split' + (sel ? ' has-sel' : '')}>
       <div className="card threads">
-        <header className="pane-h"><h2>メッセージ</h2><button className="icon-btn filled" title="新規" onClick={() => setSel('new')}><Icon n="edit_square" /></button></header>
+        <header className="pane-h"><h2 className="display-s">メッセージ</h2><button className="icon-btn filled" title="新規" onClick={() => setSel('new')}><Icon n="edit_square" /></button></header>
         {s.threads.map((t) => (
           <button key={t.id} className={'thread ' + (sel === t.id ? 'sel' : '') + ((t.unreadCount || 0) > 0 ? ' unread' : '')} onClick={() => { setSel(t.id); link.openThread(t.id) }}>
             <div className="avatar letter">{(t.name || t.address).slice(0, 1)}</div>
@@ -245,7 +359,7 @@ function Messages() {
       </div>
       <div className="card convo">
         {sel ? <>
-          <header className="convo-h">{sel === 'new' ? <input className="to" placeholder="宛先の電話番号" value={to} onChange={(e) => setTo(e.target.value)} /> : <><b>{th?.name || th?.address}</b><span className="muted small">{th?.address}</span>{th?.kind && <span className="kind-label">{th.kind === 'rcs' ? 'RCSメッセージ' : th.kind === 'mms' ? 'MMSメッセージ' : 'メッセージ'}</span>}</>}
+          <header className="convo-h"><button className="icon-btn back" title="戻る" onClick={() => { setSel(null); link.clearWatch() }}><Icon n="arrow_back" /></button>{sel === 'new' ? <input className="to" placeholder="宛先の電話番号" value={to} onChange={(e) => setTo(e.target.value)} /> : <><b>{th?.name || th?.address}</b><span className="muted small">{th?.address}</span>{th?.kind && <span className="kind-label">{th.kind === 'rcs' ? 'RCSメッセージ' : th.kind === 'mms' ? 'MMSメッセージ' : 'メッセージ'}</span>}</>}
             {th && <button className="icon-btn" title="発信" onClick={() => link.send({ t: 'dial', number: th.address })}><Icon n="call" /></button>}</header>
           <div className="bubbles">{msgs.map((m) => <div key={m.id} className={'bubble ' + (m.mine ? 'mine' : '')}>{m.body}<span>{fmtTime(m.time)}</span></div>)}<div ref={end} /></div>
           <form className="composer" onSubmit={send}><input placeholder={th?.kind === 'rcs' || th?.kind === 'mms' ? 'メッセージを入力（SMS として送信されます）' : 'メッセージを入力'} value={text} onChange={(e) => setText(e.target.value)} /><button className="icon-btn filled big"><Icon n="send" fill /></button></form>
@@ -264,7 +378,7 @@ function Calls() {
   return (
     <div className="pane split">
       <div className="card threads">
-        <header className="pane-h"><h2>通話履歴</h2></header>
+        <header className="pane-h"><h2 className="display-s">通話履歴</h2></header>
         {s.calls.map((c, i) => { const [ic, cl] = typeIcon(c.type); return (
           <div key={i} className="thread">
             <div className={'avatar call ' + cl}><Icon n={ic} /></div>
@@ -288,34 +402,45 @@ function Calls() {
 }
 
 /* ---------- Photos ---------- */
-function Thumb({ p, onOpen }: { p: Photo; onOpen?: (p: Photo) => void }) {
+function Thumb({ p, onOpen, sel }: { p: Photo; onOpen?: (p: Photo) => void; sel?: boolean }) {
   return (
-    <button className="thumb" onClick={() => (onOpen ? onOpen(p) : link.send({ t: 'photo_get', id: p.id }))} title={p.name}>
+    <button className={'thumb' + (sel ? ' sel' : '')} onClick={() => (onOpen ? onOpen(p) : link.send({ t: 'photo_get', id: p.id }))} title={p.name}>
       <img src={'data:image/jpeg;base64,' + p.thumb} alt={p.name} loading="lazy" />
       {p.video && <span className="badge"><Icon n="play_arrow" fill />{p.duration ? fmtDur(p.duration / 1000) : ''}</span>}
     </button>
   )
 }
+function PhotoDetail({ p, onClose }: { p: Photo; onClose?: () => void }) {
+  return (
+    <div className="viewer" onClick={(e) => e.stopPropagation()}>
+      <img src={'data:image/jpeg;base64,' + p.thumb} alt="" />
+      <div className="viewer-bar"><div><b>{p.name}</b><div className="muted small">{new Date(p.time).toLocaleString('ja-JP')} · {fmtSize(p.size)}{p.video ? ' · 動画' : ''}</div></div>
+        <button className="btn filled" onClick={() => { link.send({ t: 'photo_get', id: p.id }); onClose?.(); link.toast('PC に転送しています…') }}><Icon n="download" />PC に保存</button></div>
+    </div>
+  )
+}
 function Photos() {
   const s = useLink()
+  const wide = useMedia('(min-width: 1200px)')
   const [filter, setFilter] = useState<'all' | 'img' | 'vid'>('all')
   const [open, setOpen] = useState<Photo | null>(null)
   const list = s.photos.filter((p) => filter === 'all' || (filter === 'vid' ? p.video : !p.video))
+  const cur = open || (wide ? list[0] : null)
   return (
     <div className="pane">
-      <header className="pane-h"><h2>写真と動画</h2>
+      <header className="pane-h"><h2 className="display-s">写真と動画</h2>
         <div className="seg">{([['all', 'すべて'], ['img', '写真'], ['vid', '動画']] as const).map(([k, l]) => <button key={k} className={filter === k ? 'on' : ''} onClick={() => setFilter(k)}>{filter === k && <Icon n="check" />}{l}</button>)}</div>
         <button className="icon-btn" title="更新" onClick={() => link.getPhotos(true)}><Icon n="refresh" /></button>
       </header>
-      <div className="gallery">{list.map((p) => <Thumb key={p.id} p={p} onOpen={setOpen} />)}</div>
-      {!s.photos.length && <Empty icon="photo_library" text="写真と動画へのアクセスを許可すると表示されます" />}
-      {s.photosMore && <div className="center"><button className="btn tonal" onClick={() => link.getPhotos(false)}>さらに読み込む</button></div>}
-      {open && <div className="scrim" onClick={() => setOpen(null)}>
-        <div className="viewer" onClick={(e) => e.stopPropagation()}>
-          <img src={'data:image/jpeg;base64,' + open.thumb} alt="" />
-          <div className="viewer-bar"><div><b>{open.name}</b><div className="muted small">{new Date(open.time).toLocaleString('ja-JP')} · {fmtSize(open.size)}</div></div>
-            <button className="btn filled" onClick={() => { link.send({ t: 'photo_get', id: open.id }); setOpen(null); link.toast('PC に転送しています…') }}><Icon n="download" />PC に保存</button></div>
-        </div></div>}
+      <div className={wide ? 'two-pane photos-pane' : ''}>
+        <div>
+          <div className="gallery">{list.map((p) => <Thumb key={p.id} p={p} onOpen={setOpen} sel={wide && cur?.id === p.id} />)}</div>
+          {!s.photos.length && <Empty icon="photo_library" text="写真と動画へのアクセスを許可すると表示されます" />}
+          {s.photosMore && <div className="center"><button className="btn tonal" onClick={() => link.getPhotos(false)}>さらに読み込む</button></div>}
+        </div>
+        {wide && cur && <div className="pane-detail sticky"><PhotoDetail p={cur} /></div>}
+      </div>
+      {!wide && open && <div className="scrim" onClick={() => setOpen(null)}><PhotoDetail p={open} onClose={() => setOpen(null)} /></div>}
     </div>
   )
 }
@@ -337,11 +462,12 @@ function Files() {
   const pct = sending.length ? Math.round((sending.reduce((a, t) => a + t.done / Math.max(t.size, 1), 0) / sending.length) * 100) : 0
   return (
     <div className="pane">
-      <header className="pane-h"><h2>Quick Share</h2>{s.transfers.length > 0 && <button className="btn text" onClick={() => link.clearTransfers()}>履歴を消去</button>}</header>
+      <header className="pane-h"><h2 className="display-s">ファイル共有</h2>{s.transfers.length > 0 && <button className="btn text" onClick={() => link.clearTransfers()}>履歴を消去</button>}</header>
+      <div className="two-pane share-pane"><div className="col">
       <label className={'qs-hero card' + (sending.length ? ' sending' : '')}>
         <div className="qs-stage" aria-hidden="true">
           <span className="qs-ring" /><span className="qs-ring r2" /><span className="qs-ring r3" />
-          <div className="qs-core"><Icon n="nearby" fill /></div>
+          <div className="qs-core"><Icon n="share" fill /></div>
         </div>
         <div className="overline">送信先</div>
         <div className="qs-device">
@@ -352,8 +478,10 @@ function Files() {
         <p className="qs-status muted">{sending.length ? `送信中… ${pct}%` : 'タップしてファイルを選択 — この画面へのドラッグ＆ドロップでも送れます'}</p>
         <input type="file" multiple hidden onChange={(e) => e.target.files && link.sendFiles(e.target.files)} />
       </label>
-      <p className="muted small">受け取ったファイルはスマホの「ダウンロード/Tsunagu」に保存されます。スマホから送るには、ギャラリーやファイルアプリの「共有」→「Tsunagu」を選びます。</p>
-      <div className="card list-card">{s.transfers.map((t) => <TransferRow key={t.id} t={t} />)}{!s.transfers.length && <Empty icon="swap_vert" text="転送履歴はありません" />}</div>
+      <p className="muted small">受け取ったファイルはスマホの「ダウンロード/Tsunagu」に保存されます。スマホから送るには、Tsunagu アプリの「PC にファイルを送る」か、ギャラリーやファイルアプリの「共有」→「PC に送る」を選びます。</p>
+      </div>
+      <div className="card list-card"><header><h3>転送履歴</h3></header>{s.transfers.map((t) => <TransferRow key={t.id} t={t} />)}{!s.transfers.length && <Empty icon="swap_vert" text="転送履歴はありません" />}</div>
+      </div>
     </div>
   )
 }
@@ -368,7 +496,7 @@ function Explorer() {
   const parent = segs.slice(0, -1).join('/')
   return (
     <div className="pane">
-      <header className="pane-h"><h2>エクスプローラー</h2>
+      <header className="pane-h"><h2 className="display-s">エクスプローラー</h2>
         <button className="icon-btn" title="更新" onClick={() => link.fsList(path)}><Icon n="refresh" /></button>
         <button className="btn tonal" onClick={() => { const name = prompt('新しいフォルダ名'); if (name) link.fsMkdir(path, name) }}><Icon n="create_new_folder" />新規フォルダ</button>
         <label className="btn tonal"><Icon n="upload_file" />アップロード<input type="file" multiple hidden onChange={(e) => { if (e.target.files) link.fsUpload(e.target.files, path); e.target.value = '' }} /></label>
@@ -421,21 +549,21 @@ function Find() {
   const osmLink = loc ? `https://www.openstreetmap.org/?mlat=${loc.lat}&mlon=${loc.lng}#map=17/${loc.lat}/${loc.lng}` : ''
   return (
     <div className="pane">
-      <header className="pane-h"><h2>探す</h2>
+      <header className="pane-h"><h2 className="display-s">探す</h2>
         <button className="btn tonal" disabled={s.locBusy} onClick={() => link.getLocation()}><Icon n="my_location" />{s.locBusy ? '取得中…' : '位置を再取得'}</button>
         <RingButton className="btn tonal" />
       </header>
       {s.locError === 'permission' && <div className="warn-card"><Icon n="location_off" /><div><b>位置情報が許可されていません</b><p className="small">スマホの Tsunagu アプリで「位置情報」を許可してください（アプリのホーム画面の「連携する機能」から許可できます）。</p></div></div>}
       {s.locError === 'unavailable' && <div className="warn-card"><Icon n="location_off" /><div><b>位置を取得できませんでした</b><p className="small">スマホの位置情報がオフになっているか、電波の届かない場所にいる可能性があります。スマホの設定で位置情報をオンにして、もう一度お試しください。</p></div></div>}
-      {loc ? <>
+      {loc ? <div className="find-layout">
+        <iframe title="OpenStreetMap" className="map-frame" src={embed} loading="lazy" />
         <div className="card find-meta">
           <Stat icon="my_location" label="精度" value={loc.acc != null ? `±${Math.round(loc.acc)} m` : '—'} />
           <Stat icon="schedule" label="最終取得" value={new Date(loc.time).toLocaleString('ja-JP')} />
           <a className="btn text" href={osmLink} target="_blank" rel="noreferrer"><Icon n="open_in_new" />OpenStreetMap で開く</a>
+          <p className="muted small">地図データ © OpenStreetMap contributors</p>
         </div>
-        <iframe title="OpenStreetMap" className="map-frame" src={embed} loading="lazy" />
-        <p className="muted small">地図データ © OpenStreetMap contributors</p>
-      </> : !s.locError && <Empty icon="location_searching" text={s.locBusy ? 'スマホの位置を取得しています…' : '位置情報がまだありません'} />}
+      </div> : !s.locError && <Empty icon="location_searching" text={s.locBusy ? 'スマホの位置を取得しています…' : '位置情報がまだありません'} />}
     </div>
   )
 }
@@ -446,10 +574,11 @@ function Clipboard() {
   const [text, setText] = useState('')
   return (
     <div className="pane">
-      <header className="pane-h"><h2>クリップボード</h2><button className="btn filled" onClick={() => link.pushClipboard(true)}><Icon n="content_paste_go" />今のクリップボードを送る</button></header>
+      <header className="pane-h"><h2 className="display-s">クリップボード</h2><button className="btn filled" onClick={() => link.pushClipboard(true)}><Icon n="content_paste_go" />今のクリップボードを送る</button></header>
       <p className="muted small">PC はこのタブに戻ったとき、スマホはアプリを開いたときやクイック設定タイルから自動で同期します。</p>
+      <div className="two-pane clip-pane">
       <form className="card clip-compose" onSubmit={(e) => { e.preventDefault(); if (text) { link.sendClip(text); setText('') } }}>
-        <textarea placeholder="スマホに送るテキスト" value={text} onChange={(e) => setText(e.target.value)} rows={3} />
+        <textarea placeholder="スマホに送るテキスト" value={text} onChange={(e) => setText(e.target.value)} rows={5} />
         <button className="btn tonal"><Icon n="send" />送信</button>
       </form>
       <div className="card list-card">
@@ -462,6 +591,7 @@ function Clipboard() {
         {!s.clips.length && <Empty icon="content_paste" text="履歴はありません" />}
         {s.clips.length > 0 && <div className="center"><button className="btn text" onClick={() => link.clearClips()}>履歴を消去</button></div>}
       </div>
+      </div>
     </div>
   )
 }
@@ -469,7 +599,7 @@ function Clipboard() {
 /* ---------- Shell ---------- */
 const NAV = [
   ['home', 'ホーム', 'home'], ['notifs', '通知', 'notifications'], ['messages', 'メッセージ', 'chat'],
-  ['calls', '通話', 'call'], ['photos', '写真', 'photo_library'], ['files', 'Quick Share', 'nearby'],
+  ['calls', '通話', 'call'], ['photos', '写真', 'photo_library'], ['files', '共有', 'share'],
   ['explorer', 'エクスプローラー', 'folder_open'], ['find', '探す', 'location_on'], ['clip', 'クリップボード', 'content_paste'],
 ] as const
 
@@ -526,16 +656,16 @@ export default function App() {
     messages: s.threads.reduce((a, t) => a + (t.unreadCount || 0), 0),
   } as Record<string, number>), [s.notifs.length, s.threads])
   return (
-    <div className={'app ' + (drag ? 'dragging' : '')}>
-      <nav className="rail">
+    <div className={'app ' + (drag ? 'dragging' : '') + (connected ? ' on' : '')}>
+      <nav className="rail" aria-label="メイン">
         <div className="brand"><img src="/icon.svg" alt="" /><span>Tsunagu</span></div>
-        {connected && <label className="fab"><Icon n="upload" fill /><span>送る</span><input type="file" multiple hidden onChange={(e) => e.target.files && (link.sendFiles(e.target.files), setView('files'))} /></label>}
+        {connected && <label className="fab" title="ファイルを共有"><Icon n="share" fill /><span>共有</span><input type="file" multiple hidden onChange={(e) => e.target.files && (link.sendFiles(e.target.files), setView('files'))} /></label>}
         {NAV.map(([k, l, ic]) => (
           <button key={k} disabled={!connected} className={'nav ' + (view === k && connected ? 'on' : '')} onClick={() => setView(k)}>
-            <span className="pill"><Icon n={ic} fill={view === k} />{badges[k] ? <em>{badges[k] > 99 ? '99+' : badges[k]}</em> : null}</span><span className="lbl">{l}</span>
+            <span className="pill"><Icon n={ic} fill={view === k} /><span className="pl">{l}</span>{badges[k] ? <em>{badges[k] > 99 ? '99+' : badges[k]}</em> : null}</span><span className="lbl">{l}</span>
           </button>
         ))}
-        <div className="rail-foot">{connected ? <button className="nav" title="接続を解除" onClick={() => { if (confirm('ペアリングを解除して新しいコードを作りますか？')) link.regenerate() }}><span className="pill"><Icon n="link_off" /></span><span className="lbl">解除</span></button> : null}<div className="muted small center">v{APP_VERSION}</div></div>
+        <div className="rail-foot">{connected ? <button className="nav" title="接続を解除" onClick={() => { if (confirm('ペアリングを解除して新しいコードを作りますか？')) link.regenerate() }}><span className="pill"><Icon n="link_off" /><span className="pl">ペアリング解除</span></span><span className="lbl">解除</span></button> : null}<div className="muted small center">v{APP_VERSION}</div></div>
       </nav>
       <main>
         {s.incomingCall && <div className="call-banner"><Cookie lobes={8} className="spin"><Icon n="ring_volume" fill /></Cookie><div><div className="overline">着信</div><b>{s.incomingCall.name || s.incomingCall.number || '不明な番号'}</b></div>
@@ -547,7 +677,13 @@ export default function App() {
       </main>
       {s.pending && <div className="scrim"><div className="dialog"><Cookie lobes={6}><Icon n="phonelink_lock" /></Cookie><h3>{s.pending.name} が接続しようとしています</h3><p className="muted">コード入力で接続したデバイスです。許可すると、次回からは自動で接続されます。</p>
         <div className="dialog-actions"><button className="btn text" onClick={s.pending.reject}>拒否</button><button className="btn filled" onClick={s.pending.accept}>許可</button></div></div></div>}
-      {drag && <div className="drop-overlay"><div className="qs-core lg"><Icon n="nearby" fill /></div><b>ドロップして{s.device ? `${s.device.name} に送信` : 'スマホに送信'}</b></div>}
+      {s.ringing && <div className="scrim ring-scrim" onClick={() => link.stopRing()}><div className="dialog ring-dialog"><Cookie lobes={8} className="spin big"><Icon n="ring_volume" fill /></Cookie><h3 className="display-s">{s.device?.name || 'スマホ'} から呼び出し中</h3><p className="muted">この PC はここにあります</p><button className="btn filled big" onClick={() => link.stopRing()}><Icon n="stop" fill />停止</button></div></div>}
+      {s.inbox && <div className="scrim" onClick={() => link.clearInbox()}><div className="dialog inbox" onClick={(e) => e.stopPropagation()}><Cookie lobes={6}><Icon n="sms" /></Cookie><h3>{s.device?.name || 'スマホ'} からテキスト</h3>
+        <textarea readOnly value={s.inbox.text} rows={Math.min(8, Math.max(3, s.inbox.text.split('\n').length))} onFocus={(e) => e.currentTarget.select()} />
+        <div className="dialog-actions"><button className="btn text" onClick={() => link.clearInbox()}>閉じる</button>
+          {/^https?:\/\/\S+$/.test(s.inbox.text.trim()) && <a className="btn tonal" href={s.inbox.text.trim()} target="_blank" rel="noreferrer" onClick={() => link.clearInbox()}><Icon n="open_in_new" />開く</a>}
+          <button className="btn filled" onClick={() => { const t = s.inbox!.text; navigator.clipboard.writeText(t).then(() => link.toast('コピーしました')).catch(() => {}); link.clearInbox() }}><Icon n="content_copy" />コピー</button></div></div></div>}
+      {drag && <div className="drop-overlay"><div className="qs-core lg"><Icon n="share" fill /></div><b>ドロップして{s.device ? `${s.device.name} に送信` : 'スマホに送信'}</b></div>}
       <div className="toasts">{s.toasts.map((t) => <div key={t.id} className="toast">{t.text}{t.action && <button onClick={t.action.run}>{t.action.label}</button>}</div>)}</div>
     </div>
   )
