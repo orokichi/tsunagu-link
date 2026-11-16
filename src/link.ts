@@ -70,7 +70,7 @@ const ls = {
   del: (k: string) => localStorage.removeItem('ts.' + k),
 }
 const CHUNK = 48 * 1024
-export const APP_VERSION = '1.2.0'
+export const APP_VERSION = '1.2.1'
 
 /** Stored LAN endpoint (自動検出 or 手動設定). */
 function parseLan(s: string | null): LanEps | null {

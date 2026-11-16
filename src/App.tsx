@@ -126,11 +126,10 @@ function Home({ go }: { go: (v: string) => void }) {
       </section>
 
       <section className="card battery-card a-battery">
-        <Gauge value={i ? i.battery / 100 : 0} label={i ? i.battery + '%' : '—'} charging={!!i?.charging} powerSave={!!i?.powerSave} />
+        <Gauge pct={i ? i.battery : null} charging={!!i?.charging} powerSave={i?.powerSave} />
         <div className="battery-meta">
           <div className="batt-head">
             <b>{i?.charging ? '充電中' : 'バッテリー'}</b>
-            {i && <SaverFlag on={i.powerSave} />}
           </div>
           <Stat icon="signal_cellular_alt" label={i?.carrier || 'ネットワーク'} value={i?.net || '—'} />
           <Stat icon="hard_drive" label="空き容量" value={i ? fmtSize(i.storageFree) : '—'} meter={i ? 1 - i.storageFree / i.storageTotal : 0} />
@@ -173,22 +172,31 @@ const Stat = ({ icon, label, value, meter }: { icon: string; label: string; valu
 )
 const Empty = ({ icon, text }: { icon: string; text: string }) => <div className="empty"><Icon n={icon} /><span>{text}</span></div>
 
-/** Battery saver (省電力モード) state shown beside the battery level. App builds
- *  that do not report it yet show a neutral dash instead of guessing "off". */
-const SaverFlag = ({ on }: { on?: boolean | null }) => (
-  <span className={'batt-flag' + (on === true ? ' on' : '') + (on == null ? ' unknown' : '')}
-    title={on == null ? 'スマホのアプリがバッテリーセーバーの状態をまだ送っていません' : 'スマホのバッテリーセーバー（省電力モード）'}>
-    <Icon n="battery_saver" fill={on === true} />バッテリーセーバー{on == null ? ' —' : on ? ' オン' : ' オフ'}
-  </span>
-)
+/** Battery icon that follows the reported level (Material Symbols has battery_0_bar
+ *  … battery_6_bar, and the charging_20 … charging_full family for charging).
+ *  Battery saver takes over the slot, and unknown levels get the unknown icon. */
+function batteryIcon(pct: number, charging: boolean, powerSave: boolean) {
+  if (powerSave) return 'battery_saver'
+  const p = Math.max(0, Math.min(100, pct))
+  if (charging) return p >= 95 ? 'battery_charging_full' : p >= 85 ? 'battery_charging_90'
+    : p >= 70 ? 'battery_charging_80' : p >= 55 ? 'battery_charging_60'
+    : p >= 40 ? 'battery_charging_50' : p >= 25 ? 'battery_charging_30' : 'battery_charging_20'
+  return p >= 96 ? 'battery_full' : `battery_${Math.min(6, Math.round((p / 100) * 6))}_bar`
+}
 
 /** Expressive circular gauge (wavy when charging). */
-function Gauge({ value, label, charging, powerSave }: { value: number; label: string; charging: boolean; powerSave?: boolean }) {
-  const r = 52, c = 2 * Math.PI * r, v = Math.max(0, Math.min(1, value))
+function Gauge({ pct, charging, powerSave }: { pct: number | null; charging: boolean; powerSave?: boolean | null }) {
+  const r = 52, c = 2 * Math.PI * r, v = Math.max(0, Math.min(1, (pct ?? 0) / 100))
+  const label = pct == null ? '—' : pct + '%'
+  const icon = pct == null ? 'battery_unknown' : batteryIcon(pct, charging, powerSave === true)
+  const title = pct == null ? 'バッテリー残量を取得していません'
+    : `バッテリー ${pct}%${charging ? '（充電中）' : ''}` +
+      (powerSave == null ? '・バッテリーセーバーの状態は未取得' : powerSave ? '・バッテリーセーバー オン' : '・バッテリーセーバー オフ')
   return (
-    <div className={'gauge' + (charging ? ' charging' : '') + (powerSave ? ' saver' : '') + (v <= 0.15 ? ' low' : '')}>
+    <div className={'gauge' + (charging ? ' charging' : '') + (powerSave ? ' saver' : '') + (pct != null && v <= 0.15 ? ' low' : '')}
+      role="img" aria-label={title} title={title}>
       <svg viewBox="0 0 128 128"><circle className="g-track" cx="64" cy="64" r={r} /><circle className="g-fill" cx="64" cy="64" r={r} strokeDasharray={`${c * v} ${c}`} /></svg>
-      <div className="g-in"><Icon n={charging ? 'bolt' : 'battery_horiz_075'} fill /><b>{label}</b></div>
+      <div className="g-in"><Icon n={icon} fill /><b>{label}</b></div>
     </div>
   )
 }
@@ -485,7 +493,7 @@ function Files() {
         <div className="qs-device">
           <div className="qs-avatar"><Icon n="smartphone" fill /></div>
           <div className="qs-name">{s.device?.name || 'スマホ'}</div>
-          <div className="muted small">{s.device?.model}{s.info ? ` · バッテリー ${s.info.battery}%${s.info.charging ? '（充電中）' : ''}${s.info.powerSave ? ' · バッテリーセーバー オン' : ''}` : ''}</div>
+          <div className="muted small">{s.device?.model}{s.info ? ` · バッテリー ${s.info.battery}%${s.info.charging ? '（充電中）' : ''}` : ''}</div>
         </div>
         <p className="qs-status muted">{sending.length ? `送信中… ${pct}%` : 'タップしてファイルを選択 — この画面へのドラッグ＆ドロップでも送れます'}</p>
         <input type="file" multiple hidden onChange={(e) => { if (e.target.files?.length) link.sendFiles(e.target.files); e.target.value = '' }} />
