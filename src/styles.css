@@ -756,21 +756,21 @@ main > * { animation: enter .6s var(--spring-soft); }
   animation: orb-spin var(--dur, 18s) linear infinite;
   will-change: transform, --angle;
 }
-.orb-core .l1 { --dur: 18s; background: conic-gradient(from var(--angle), #7c5cff 0deg, #2fd4ff 110deg, transparent 190deg, #7c5cff 360deg); opacity: .95; }
-.orb-core .l2 { --dur: 12s; background: conic-gradient(from calc(var(--angle) * -1), transparent 0deg, #ff6bb5 90deg, #ffd166 170deg, transparent 250deg); opacity: .8; animation-direction: reverse; }
-.orb-core .l3 { --dur: 24s; background: conic-gradient(from calc(var(--angle) + 60deg), #6bf0c0 0deg, transparent 90deg, #2fd4ff 200deg, transparent 300deg); opacity: .7; }
-.orb-core .l4 { --dur: 9s; background: conic-gradient(from calc(var(--angle) * 2), transparent 0deg, #ffffff 40deg, transparent 90deg); opacity: .22; }
-.orb-core .l5 { --dur: 32s; background: radial-gradient(circle at 30% 25%, #ffffff2e, transparent 55%); opacity: .8; animation: none; }
-.orb-core .l6 { --dur: 16s; background: conic-gradient(from calc(var(--angle) + 200deg), transparent 0deg, #9d7bff 80deg, transparent 140deg); opacity: .5; animation-direction: reverse; }
+.orb-core .l1 { --dur: 18s; background: conic-gradient(from var(--angle), #6a3cff, #17b8ff 22%, #6a3cff 45%, #b06bff 68%, #17b8ff 88%, #6a3cff); opacity: .9; }
+.orb-core .l2 { --dur: 12s; background: conic-gradient(from calc(var(--angle) * -1), #ff3d9a, #ffb020 26%, #ff3d9a 52%, #ff5ec4 78%, #ff3d9a); opacity: .55; animation-direction: reverse; }
+.orb-core .l3 { --dur: 24s; background: conic-gradient(from calc(var(--angle) + 60deg), #12e0a8, #17b8ff 34%, #12e0a8 66%, #57ffd0 88%, #12e0a8); opacity: .45; }
+.orb-core .l4 { --dur: 9s; background: conic-gradient(from calc(var(--angle) * 2), transparent 0deg, #ffffff 30deg, transparent 85deg); opacity: .16; }
+.orb-core .l5 { --dur: 32s; background: radial-gradient(circle at 32% 26%, #ffffff26, transparent 52%); opacity: .7; animation: none; }
+.orb-core .l6 { --dur: 16s; background: conic-gradient(from calc(var(--angle) + 200deg), transparent 0deg, #a98bff 70deg, transparent 135deg); opacity: .38; animation-direction: reverse; }
 .orb-dots {
-  position: absolute; inset: 0; border-radius: 50%; mix-blend-mode: overlay; opacity: .26;
+  position: absolute; inset: 0; border-radius: 50%; mix-blend-mode: overlay; opacity: .14;
   background-image: radial-gradient(circle, #ffffff 1px, transparent 1.3px);
   background-size: calc(3.6px * var(--u)) calc(3.6px * var(--u));
 }
 .orb-shine {
   position: absolute; inset: 0; border-radius: 50%;
-  background: radial-gradient(circle at 32% 26%, #ffffff30, transparent 40%), radial-gradient(circle at 70% 84%, #00000066, transparent 56%);
-  box-shadow: inset 0 0 calc(9px * var(--u)) #ffffff1f;
+  background: radial-gradient(circle at 32% 26%, #ffffff24, transparent 38%), radial-gradient(circle at 70% 84%, #00000073, transparent 58%);
+  box-shadow: inset 0 0 calc(10px * var(--u)) #ffffff1a;
 }
 .orb-glow {
   position: absolute; inset: -26%; border-radius: 50%; pointer-events: none;
