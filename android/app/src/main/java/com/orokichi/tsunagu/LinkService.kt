@@ -178,9 +178,13 @@ class LinkService : Service() {
     private fun startWatchdog() {
         scope.launch {
             while (isActive) {
-                delay(4000)
+                delay(10_000)
                 if (!connected() || activeVia == "usb") continue
-                if (System.currentTimeMillis() - lastRxAt < 16_000) continue
+                // Generous on purpose: the PC's browser throttles its timers
+                // while its tab is hidden (about once a minute), and dropping a
+                // healthy link there would be exactly the instability this
+                // watchdog exists to remove.
+                if (System.currentTimeMillis() - lastRxAt < 90_000) continue
                 lastRxAt = System.currentTimeMillis()
                 main.post {
                     // Drop the live transport and redial the cloud; a fresh LAN

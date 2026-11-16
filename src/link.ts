@@ -482,7 +482,12 @@ class Link {
       // Waking the device (or switching back to this tab) is the moment the old
       // socket is most likely dead: check it at once instead of waiting.
       if (!this.conn?.open) this.reconnectNow()
-      else this.heartbeat()
+      else {
+        // Coming back to the tab: give the link a moment to answer the ping
+        // below before any silence is judged.
+        this.lastRx = Date.now()
+        this.heartbeat()
+      }
     })
     // Network came back (Wi-Fi roamed, VPN up, hotspot on): stop waiting out the
     // backoff and try everything again immediately.
@@ -651,9 +656,13 @@ class Link {
       return
     }
     if (!c.open) { this.dropStale('closed'); return }
-    // Silence only means "dead" once this phone has proved it answers pings. An
+    // A hidden tab has its timers throttled (Chrome: about once a minute), so
+    // silence there says nothing about the link — judging it would tear down a
+    // perfectly good connection every time the user switched tabs.
+    // Silence only means "dead" once this phone has proved it answers pings: an
     // older app build does not know `ping` and would look silent while healthy.
-    if (this.pongs > 0 && this.lastRx && now - this.lastRx > HEARTBEAT_DEAD_MS) { this.dropStale('silent'); return }
+    const hidden = typeof document !== 'undefined' && document.hidden
+    if (!hidden && this.pongs > 0 && this.lastRx && now - this.lastRx > HEARTBEAT_DEAD_MS) { this.dropStale('silent'); return }
     this.hbSentAt = now
     try { c.send({ t: 'ping', ts: now }) } catch { this.dropStale('closed') }
   }
