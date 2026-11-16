@@ -4,11 +4,19 @@ import './styles.css'
 import { applyTheme } from './theme'
 
 applyTheme(localStorage.getItem('ts.seed') || undefined)
-createRoot(document.getElementById('root')!).render(<App />)
+// Replace the inline boot splash (index.html) with the app itself.
+const rootEl = document.getElementById('root')!
+rootEl.replaceChildren()
+createRoot(rootEl).render(<App />)
 
-// PWA: the service worker shows desktop notifications (with inline reply) and
-// provides the offline shell. Its cache is network-first, so deploys are never
-// masked by a stale cached version.
+// PWA: the service worker provides the offline shell (cache-first, so a
+// Chromebook start paints without waiting for the network), the share target
+// that receives files/text from other apps, and desktop notifications.
+// Registering right away — not on `load` — lets the install start while the
+// first screen is still being drawn, and a periodic update() picks up a new
+// deploy in the background.
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(() => {}) })
+  navigator.serviceWorker.register('/sw.js').then((reg) => {
+    window.setInterval(() => { reg.update().catch(() => {}) }, 30 * 60 * 1000)
+  }).catch(() => {})
 }

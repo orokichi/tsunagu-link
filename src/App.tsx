@@ -1,13 +1,12 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import QRCode from 'qrcode'
 import { link, Photo, Transfer, APP_VERSION } from './link'
 import { applyTheme } from './theme'
+import { Icon, QuickShareIcon } from './icons'
+import Desktop from './desktop'
+export { Icon, QuickShareIcon }
 
 const APK_URL = 'https://github.com/orokichi/tsunagu-link/releases/latest'
 const useLink = () => useSyncExternalStore(link.subscribe, link.get)
-export const Icon = ({ n, fill, className = '' }: { n: string; fill?: boolean; className?: string }) =>
-  <span className={'ms ' + className} style={fill ? { fontVariationSettings: "'FILL' 1" } : undefined}>{n}</span>
-
 /* ---------- Expressive shapes ---------- */
 function cookiePath(lobes: number, depth = 0.08, r = 50) {
   const pts: string[] = []
@@ -52,7 +51,14 @@ const fmtDur = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)
 function Pairing() {
   const s = useLink()
   const [qr, setQr] = useState('')
-  useEffect(() => { QRCode.toDataURL(link.qrText, { margin: 1, width: 560, color: { dark: '#1b1b21', light: '#ffffff' } }).then(setQr) }, [s.code, s.secret])
+  useEffect(() => {
+    let alive = true
+    // QRCode is only needed on the pairing screen: load it with the screen, not
+    // with the app, so a paired Chromebook never pays for it at startup.
+    import('qrcode').then((m) => m.default.toDataURL(link.qrText, { margin: 1, width: 560, color: { dark: '#1b1b21', light: '#ffffff' } }))
+      .then((d) => { if (alive) setQr(d) }).catch(() => {})
+    return () => { alive = false }
+  }, [s.code, s.secret])
   return (
     <div className="pair">
       <section className="pair-hero">
@@ -176,7 +182,7 @@ function Home({ go }: { go: (v: string) => void }) {
       <section className="card actions a-actions">
         <h3>クイック操作</h3>
         <div className="action-grid">
-          <label className="action-tile"><span className="at-icon"><Icon n="share" fill /></span><b>ファイル共有</b><span className="muted small">スマホに送る</span><input type="file" multiple hidden onChange={(e) => { if (e.target.files) link.sendFiles(e.target.files); e.target.value = '' }} /></label>
+          <label className="action-tile"><span className="at-icon"><QuickShareIcon size={22} /></span><b>Quick Share</b><span className="muted small">スマホに送る</span><input type="file" multiple hidden onChange={(e) => { if (e.target.files) link.sendFiles(e.target.files); e.target.value = '' }} /></label>
           <button className="action-tile" onClick={() => link.pushClipboard(true)}><span className="at-icon"><Icon n="content_paste_go" /></span><b>クリップボード</b><span className="muted small">スマホに送る</span></button>
           <button className="action-tile" onClick={() => go('find')}><span className="at-icon"><Icon n="location_on" /></span><b>探す</b><span className="muted small">地図で表示</span></button>
           <button className="action-tile" onClick={() => go('explorer')}><span className="at-icon"><Icon n="folder_open" /></span><b>ファイル</b><span className="muted small">ストレージを開く</span></button>
@@ -365,7 +371,7 @@ function Notifs() {
       {s.notifsError === 'off' && <div className="warn-card">
         <Icon n="notifications_off" />
         <div><b>スマホの「通知へのアクセス」がオフになっています</b>
-          <p className="small">スマホの「設定」→「通知」→「通知へのアクセス」で Tsunagu をオンにすると、通知の表示・返信・消去ができるようになります。</p></div>
+          <p className="small">スマホの「設定」→「通知」→「通知へのアクセス」で Quick Link をオンにすると、通知の表示・返信・消去ができるようになります。</p></div>
         <button className="btn filled" onClick={() => link.permOpen('listener')}>スマホで許可</button>
       </div>}
       {wide ? (
@@ -415,7 +421,7 @@ function Messages() {
           <Icon n="error" />
           <div><b>{s.threadsError === 'permission' ? 'メッセージへのアクセスが許可されていません' : 'メッセージを読み込めませんでした'}</b>
             <p className="small">{s.threadsError === 'permission'
-              ? 'スマホの Tsunagu アプリの「連携する機能」→「メッセージ (SMS)」から許可してください。'
+              ? 'スマホの Quick Link アプリの「連携する機能」→「メッセージ (SMS)」から許可してください。'
               : s.threadsError}</p></div>
         </div>}
         {s.threads.map((t) => (
@@ -537,16 +543,22 @@ function TransferRow({ t }: { t: Transfer }) {
 }
 function Files() {
   const s = useLink()
+  const [text, setText] = useState('')
+  const [picked, setPicked] = useState<File[]>([])
   const sending = s.transfers.filter((t) => t.state === 'active' && t.dir === 'out')
   const pct = sending.length ? Math.round((sending.reduce((a, t) => a + t.done / Math.max(t.size, 1), 0) / sending.length) * 100) : 0
+  const send = () => {
+    link.sendToPhone(picked, text)
+    setPicked([]); setText('')
+  }
   return (
     <div className="pane">
-      <header className="pane-h"><h2 className="display-s">ファイル共有</h2>{s.transfers.length > 0 && <button className="btn text" onClick={() => link.clearTransfers()}>履歴を消去</button>}</header>
+      <header className="pane-h"><h2 className="display-s">Quick Share</h2>{s.transfers.length > 0 && <button className="btn text" onClick={() => link.clearTransfers()}>履歴を消去</button>}</header>
       <div className="two-pane share-pane"><div className="col">
       <label className={'qs-hero card' + (sending.length ? ' sending' : '')}>
         <div className="qs-stage" aria-hidden="true">
           <span className="qs-ring" /><span className="qs-ring r2" /><span className="qs-ring r3" />
-          <div className="qs-core"><Icon n="share" fill /></div>
+          <div className="qs-core"><QuickShareIcon size={44} /></div>
         </div>
         <div className="overline">送信先</div>
         <div className="qs-device">
@@ -557,9 +569,72 @@ function Files() {
         <p className="qs-status muted">{sending.length ? `送信中… ${pct}%` : 'タップしてファイルを選択 — この画面へのドラッグ＆ドロップでも送れます'}</p>
         <input type="file" multiple hidden onChange={(e) => { if (e.target.files?.length) link.sendFiles(e.target.files); e.target.value = '' }} />
       </label>
-      <p className="muted small">受け取ったファイルはスマホの「ダウンロード/Tsunagu」に保存されます。スマホから送るには、Tsunagu アプリの「PC にファイルを送る」か、ギャラリーやファイルアプリの「共有」→「PC に送る」を選びます。</p>
+
+      {/* テキスト・URL・ファイルをまとめて: the share sheet is for files AND text. */}
+      <section className="card share-compose">
+        <header><h3>スマートフォンに送信</h3><span className="muted small">ファイルでもテキストでも</span></header>
+        <textarea rows={3} placeholder="スマートフォンに送るテキストや URL（ファイルと一緒でも OK）" value={text} onChange={(e) => setText(e.target.value)} />
+        {!!picked.length && <div className="sc-picked">{picked.map((f, i2) => (
+          <span key={i2} className="sc-chip"><Icon n="description" />{f.name}<button type="button" aria-label="外す" onClick={() => setPicked(picked.filter((_, j) => j !== i2))}><Icon n="close" /></button></span>
+        ))}</div>}
+        <div className="sc-row">
+          <label className="btn tonal"><Icon n="attach_file" />ファイルを選ぶ<input type="file" multiple hidden onChange={(e) => { if (e.target.files?.length) setPicked([...picked, ...Array.from(e.target.files)]); e.target.value = '' }} /></label>
+          <button className="btn filled" disabled={!picked.length && !text.trim()} onClick={send}><QuickShareIcon size={18} />スマートフォンに送信</button>
+        </div>
+        <p className="muted small">テキストはスマホのクリップボードに入り、ファイルはスマホの「ダウンロード/Tsunagu」に保存されます。接続していないときは、つながった時点で自動で送ります。</p>
+      </section>
+      <p className="muted small">スマホから送るには、Quick Link アプリの「PC にファイルを送る」か、ギャラリーやファイルアプリの「共有」→「PC に送る」を選びます。</p>
       </div>
       <div className="card list-card"><header><h3>転送履歴</h3></header>{s.transfers.map((t) => <TransferRow key={t.id} t={t} />)}{!s.transfers.length && <Empty icon="swap_vert" text="転送履歴はありません" />}</div>
+      </div>
+    </div>
+  )
+}
+
+/* ---------- System share sheet (Web Share Target) ---------- */
+/**
+ * Another app on this computer shared something with Quick Link (files, text,
+ * a link, or only a title). Show it, then send it to the phone in one press —
+ * or hold it until the phone is connected.
+ */
+function ShareSheet() {
+  const s = useLink()
+  const e = s.share
+  if (!e) return null
+  const text = (e.text || e.url || '').trim()
+  const count = e.files.length
+  return (
+    <div className="scrim share-scrim" onClick={() => link.closeShare()}>
+      <div className="dialog share-sheet" onClick={(ev) => ev.stopPropagation()} role="dialog" aria-label="共有された内容をスマートフォンに送信">
+        <div className="ss-head">
+          <span className="ss-mark"><QuickShareIcon size={30} /></span>
+          <div><div className="overline">共有された内容</div><h3>スマートフォンに送信</h3></div>
+          <button className="icon-btn" aria-label="閉じる" onClick={() => link.closeShare()}><Icon n="close" /></button>
+        </div>
+        {count > 0 && <div className="ss-files">
+          {e.files.map((f) => (
+            <div key={f.key} className="ss-file">
+              <span className="ss-file-icon"><Icon n={/^image\//.test(f.type) ? 'image' : /^video\//.test(f.type) ? 'movie' : 'description'} /></span>
+              <div><b>{f.name}</b><span className="small muted">{fmtSize(f.size)} · {f.type}</span></div>
+            </div>
+          ))}
+        </div>}
+        {text && <div className="ss-text">{text}</div>}
+        {!text && !count && e.title && <div className="ss-text">{e.title}</div>}
+        {!text && !count && !e.title && <div className="ss-empty muted small"><Icon n="info" />共有された内容が空でした。</div>}
+        <div className="ss-note small">
+          <Icon n={s.status === 'connected' ? 'smartphone' : 'cloud_off'} />
+          {s.shareQueued
+            ? 'スマートフォンに接続した時点で自動で送信します。'
+            : s.status === 'connected'
+              ? `${s.device?.name || 'スマートフォン'} に送ります${text && count ? '（テキスト + ファイル）' : count ? '（ファイル）' : '（テキスト）'}。`
+              : 'いまはスマートフォンに接続していません。送信を押すと、つながった時点で自動で送ります。'}
+        </div>
+        <div className="dialog-actions">
+          <button className="btn text" onClick={() => link.closeShare()}>キャンセル</button>
+          {text && <button className="btn tonal" onClick={() => { navigator.clipboard.writeText(text).then(() => link.toast('コピーしました')).catch(() => {}) }}><Icon n="content_copy" />コピー</button>}
+          <button className="btn filled" onClick={() => void link.sendShare()}><QuickShareIcon size={20} />{s.status === 'connected' ? 'スマートフォンに送信' : '接続したら送信'}</button>
+        </div>
       </div>
     </div>
   )
@@ -583,7 +658,7 @@ function Explorer() {
       {s.fsReady && !s.fsAccess && <div className="warn-card">
         <Icon n="lock" />
         <div><b>すべてのファイルへのアクセスが許可されていません</b>
-          <p className="small">許可がないフォルダは中身が表示されません。スマホの Tsunagu アプリの「連携する機能」→「エクスプローラー（全ファイル）」からも許可できます。</p></div>
+          <p className="small">許可がないフォルダは中身が表示されません。スマホの Quick Link アプリの「連携する機能」→「エクスプローラー（全ファイル）」からも許可できます。</p></div>
         <button className="btn filled" onClick={() => link.fsPerm()}>スマホで許可画面を開く</button>
       </div>}
       <div className="crumbs">
@@ -640,7 +715,7 @@ function Find() {
       {s.locError === 'permission' && <div className="warn-card">
         <Icon n="location_off" />
         <div><b>位置情報が許可されていません</b>
-          <p className="small">スマホの Tsunagu アプリで「位置情報」を許可してください。下のボタンでスマホの許可画面を開けます（アプリのホーム画面の「連携する機能」からも許可できます）。</p></div>
+          <p className="small">スマホの Quick Link アプリで「位置情報」を許可してください。下のボタンでスマホの許可画面を開けます（アプリのホーム画面の「連携する機能」からも許可できます）。</p></div>
         <button className="btn filled" onClick={() => link.locPerm('fix')}>スマホで許可</button>
       </div>}
       {s.locError === 'foreground_only' && <div className="warn-card">
@@ -761,6 +836,21 @@ function Settings() {
         <UsbPanel settings />
       </section>
 
+      <section className="card set-card a-exp">
+        <div className="set-head">
+          <div><h3>実験的な機能</h3><p className="muted small">試せる新機能です。不具合があっても元に戻せます</p></div>
+        </div>
+        <button className={'set-toggle' + (s.bookUi ? ' on' : '')} role="switch" aria-checked={!!s.bookUi} onClick={() => link.setBookUi(!s.bookUi)}>
+          <span className="st-icon"><Icon n="desktop_windows" fill={!!s.bookUi} /></span>
+          <span className="st-text">
+            <b>Googlebook OS デスクトップUI（実験的）</b>
+            <span className="small muted">Android ベースの新しいデスクトップ OS「Googlebook OS」を模した画面に切り替えます。上部のステータスバー、中央のフローティングドック、Pixel 風ウィジェットのあるホーム、各機能をフローティングウィンドウで並べて使えます。オン／オフはいつでも切り替えられ、次に開いたときも覚えています。</span>
+          </span>
+          <span className="st-switch" aria-hidden="true"><i /></span>
+        </button>
+        <p className="muted small">オンの間も、通知・メッセージ・写真・Quick Share・ファイル・設定などすべての機能をそのまま使えます。この設定はこの PC だけに保存されます。</p>
+      </section>
+
       <section className="card set-card">
         <div className="set-head"><div><h3>この PC</h3><p className="muted small">スマホのアプリに表示される情報</p></div></div>
         <div className="set-row">
@@ -769,7 +859,7 @@ function Settings() {
           <Stat icon="desktop_windows" label="画面" value={pc.screen} />
           <Stat icon="notifications" label="閉じていても通知" value={s.pushState === 'on' ? '有効' : s.pushState === 'unsupported' ? '非対応' : s.pushState === 'blocked' ? 'ブロック中' : 'オフ'} />
         </div>
-        <p className="muted small">Tsunagu Web v{APP_VERSION} · USB ケーブル接続はスマホのアプリ v1.3.0 以降で使えます。v1.2.0 以降ならバッテリーセーバーの状態も表示できます。</p>
+        <p className="muted small">Quick Link Web v{APP_VERSION} · USB ケーブル接続はスマホのアプリ v1.3.0 以降で使えます。v1.2.0 以降ならバッテリーセーバーの状態も表示できます。</p>
       </section>
     </div>
   )
@@ -785,7 +875,13 @@ const NAV = [
 
 export default function App() {
   const s = useLink()
-  const [view, setView] = useState<string>('home')
+  const [view, setView] = useState<string>(() => {
+    // ?view=… (PWA shortcuts) and ?share=1 (the 共有 screen) open straight there.
+    const q = new URLSearchParams(location.search)
+    const v = q.get('view')
+    if (v && NAV.some(([k]) => k === v)) return v
+    return q.get('share') === '1' ? 'files' : 'home'
+  })
   const [drag, setDrag] = useState(false)
   useEffect(() => { applyTheme(s.seed); const mq = matchMedia('(prefers-color-scheme: dark)'); const f = () => applyTheme(s.seed); mq.addEventListener('change', f); return () => mq.removeEventListener('change', f) }, [s.seed])
   const connected = s.status === 'connected'
@@ -835,14 +931,20 @@ export default function App() {
     notifs: s.notifs.length,
     messages: s.threads.reduce((a, t) => a + (t.unreadCount || 0), 0),
   } as Record<string, number>), [s.notifs.length, s.threads])
+  const renderView = (v: string) =>
+    !connected && v !== 'settings' ? <Pairing /> :
+    v === 'home' ? <Home go={setView} /> : v === 'notifs' ? <Notifs /> : v === 'messages' ? <Messages /> :
+    v === 'calls' ? <Calls /> : v === 'photos' ? <Photos /> : v === 'files' ? <Files /> :
+    v === 'explorer' ? <Explorer /> : v === 'find' ? <Find /> : v === 'clip' ? <Clipboard /> : <Settings />
   return (
-    <div className={'app ' + (drag ? 'dragging' : '') + (connected ? ' on' : '')}>
+    <div className={'app' + (drag ? ' dragging' : '') + (connected ? ' on' : '') + (s.bookUi ? ' bookmode' : '')}>
+      {s.bookUi ? <Desktop s={s} view={view} setView={setView} renderView={renderView} badges={badges} /> : <>
       <nav className="rail" aria-label="メイン">
-        <div className="brand"><img src="/icon.svg" alt="" /><span>Tsunagu</span></div>
-        {connected && <label className="fab" title="ファイルを共有"><Icon n="share" fill /><span>共有</span><input type="file" multiple hidden onChange={(e) => { if (e.target.files?.length) { link.sendFiles(e.target.files); setView('files') } e.target.value = '' }} /></label>}
+        <div className="brand"><img src="/icon.svg" alt="" /><span>Quick Link</span></div>
+        {connected && <label className="fab" title="Quick Share で送る"><QuickShareIcon size={26} /><span>Quick Share</span><input type="file" multiple hidden onChange={(e) => { if (e.target.files?.length) { link.sendFiles(e.target.files); setView('files') } e.target.value = '' }} /></label>}
         {NAV.map(([k, l, ic]) => (
           <button key={k} disabled={!connected && k !== 'settings'} className={'nav ' + (view === k ? 'on' : '')} onClick={() => setView(k)}>
-            <span className="pill"><Icon n={ic} fill={view === k} /><span className="pl">{l}</span>{badges[k] ? <em>{badges[k] > 99 ? '99+' : badges[k]}</em> : null}</span><span className="lbl">{l}</span>
+            <span className="pill">{k === 'files' ? <QuickShareIcon size={22} /> : <Icon n={ic} fill={view === k} />}<span className="pl">{l}</span>{badges[k] ? <em>{badges[k] > 99 ? '99+' : badges[k]}</em> : null}</span><span className="lbl">{l}</span>
           </button>
         ))}
         <div className="rail-foot">{connected ? <button className="nav" title="接続を解除" onClick={() => { if (confirm('ペアリングを解除して新しいコードを作りますか？')) link.regenerate() }}><span className="pill"><Icon n="link_off" /><span className="pl">ペアリング解除</span></span><span className="lbl">解除</span></button> : null}<div className="muted small center">v{APP_VERSION}</div></div>
@@ -850,11 +952,9 @@ export default function App() {
       <main>
         {s.incomingCall && <div className="call-banner"><Cookie lobes={8} className="spin"><Icon n="ring_volume" fill /></Cookie><div><div className="overline">着信</div><b>{s.incomingCall.name || s.incomingCall.number || '不明な番号'}</b></div>
           <button className="btn filled danger" onClick={() => link.send({ t: 'call_end' })}><Icon n="call_end" />拒否</button></div>}
-        {!connected && view !== 'settings' ? <Pairing /> :
-          view === 'home' ? <Home go={setView} /> : view === 'notifs' ? <Notifs /> : view === 'messages' ? <Messages /> :
-          view === 'calls' ? <Calls /> : view === 'photos' ? <Photos /> : view === 'files' ? <Files /> :
-          view === 'explorer' ? <Explorer /> : view === 'find' ? <Find /> : view === 'clip' ? <Clipboard /> : <Settings />}
+        {renderView(view)}
       </main>
+      </>}
       {s.pending && <div className="scrim"><div className="dialog"><Cookie lobes={6}><Icon n="phonelink_lock" /></Cookie><h3>{s.pending.name} が接続しようとしています</h3><p className="muted">コード入力で接続したデバイスです。許可すると、次回からは自動で接続されます。</p>
         <div className="dialog-actions"><button className="btn text" onClick={s.pending.reject}>拒否</button><button className="btn filled" onClick={s.pending.accept}>許可</button></div></div></div>}
       {s.ringing && <div className="scrim ring-scrim" onClick={() => link.stopRing()}><div className="dialog ring-dialog"><Cookie lobes={8} className="spin big"><Icon n="ring_volume" fill /></Cookie><h3 className="display-s">{s.device?.name || 'スマホ'} から呼び出し中</h3><p className="muted">この PC はここにあります</p><button className="btn filled big" onClick={() => link.stopRing()}><Icon n="stop" fill />停止</button></div></div>}
@@ -863,7 +963,8 @@ export default function App() {
         <div className="dialog-actions"><button className="btn text" onClick={() => link.clearInbox()}>閉じる</button>
           {/^https?:\/\/\S+$/.test(s.inbox.text.trim()) && <a className="btn tonal" href={s.inbox.text.trim()} target="_blank" rel="noreferrer" onClick={() => link.clearInbox()}><Icon n="open_in_new" />開く</a>}
           <button className="btn filled" onClick={() => { const t = s.inbox!.text; navigator.clipboard.writeText(t).then(() => link.toast('コピーしました')).catch(() => {}); link.clearInbox() }}><Icon n="content_copy" />コピー</button></div></div></div>}
-      {drag && <div className="drop-overlay"><div className="qs-core lg"><Icon n="share" fill /></div><b>ドロップして{s.device ? `${s.device.name} に送信` : 'スマホに送信'}</b></div>}
+      {drag && <div className="drop-overlay"><div className="qs-core lg"><QuickShareIcon size={54} /></div><b>ドロップして{s.device ? `${s.device.name} に送信` : 'スマホに送信'}</b></div>}
+      <ShareSheet />
       <div className="toasts">{s.toasts.map((t) => <div key={t.id} className="toast">{t.text}{t.action && <button onClick={t.action.run}>{t.action.label}</button>}</div>)}</div>
     </div>
   )

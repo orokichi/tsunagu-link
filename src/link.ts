@@ -1,7 +1,11 @@
-import Peer, { DataConnection } from 'peerjs'
-import { Adb, AdbDaemonTransport, AdbSocket } from '@yume-chan/adb'
-import { AdbDaemonWebUsbDevice, AdbDaemonWebUsbDeviceManager } from '@yume-chan/adb-daemon-webusb'
-import AdbWebCredentialStore from '@yume-chan/adb-credential-web'
+// Type-only imports: the heavy libraries (PeerJS, the ADB stack, QRCode) are
+// pulled in with a dynamic import at the moment they are needed, so the first
+// paint never waits for them — the Chromebook start stays under a second.
+import type { DataConnection } from 'peerjs'
+import type { Adb, AdbSocket } from '@yume-chan/adb'
+import type { AdbDaemonWebUsbDevice } from '@yume-chan/adb-daemon-webusb'
+import type PeerType from 'peerjs'
+import { deleteShared, getShared, pruneShared, readSharedFiles, SharedEntry } from './share'
 
 export type Status = 'starting' | 'waiting' | 'connected' | 'error'
 export type Via = 'lan' | 'cloud' | 'usb'
@@ -78,6 +82,14 @@ export interface State {
   usbSupported: boolean
   usbBusy: boolean
   usbMessage?: string
+  /** Content handed over by the system share sheet (Web Share Target). */
+  share?: SharedEntry | null
+  /** Kept until it can be sent (the phone was not connected yet). */
+  shareQueued?: boolean
+  /** Experimental 「Googlebook OS」 desktop UI (設定 → 実験的な機能). */
+  bookUi?: boolean
+  /** Round-trip of the last heartbeat, for the connection badge. */
+  latency?: number | null
 }
 
 const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -88,7 +100,12 @@ const ls = {
   del: (k: string) => localStorage.removeItem('ts.' + k),
 }
 const CHUNK = 48 * 1024
-export const APP_VERSION = '1.3.1'
+export const APP_VERSION = '1.4.0'
+/** How often the two ends ping each other, and how long silence is tolerated
+ *  before the link is treated as dead (a data channel can stay "open" long
+ *  after the other side is gone: Wi-Fi roamed, laptop slept, phone lost data). */
+const HEARTBEAT_MS = 4000
+const HEARTBEAT_DEAD_MS = 14000
 
 /** Stored LAN endpoint (自動検出 or 手動設定). */
 function parseLan(s: string | null): LanEps | null {
@@ -261,7 +278,7 @@ async function sha256Hex(s: string) {
   return [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('')
 }
 
-/** The phone answered as an ADB device but has no Tsunagu USB socket yet. */
+/** The phone answered as an ADB device but has no Quick Link USB socket yet. */
 class UsbNoAppError extends Error {}
 
 /** Rejects (with a spoken-to-the-user reason) if `p` takes longer than `ms`. */
@@ -280,7 +297,7 @@ function usbErrorText(e: any): string {
   if (name === 'NotFoundError') return 'USB デバイスが選ばれませんでした。'
   if (name === 'SecurityError' || name === 'NetworkError' || name === 'NotAllowedError') return 'USB へのアクセスが許可されませんでした。スマホの画面の確認で「許可」を押してください。'
   if (name === 'InvalidStateError') return 'USB デバイスが既に使われています。ケーブルを差し直してからお試しください。'
-  if (/underlying connection|closed|broken pipe|rejected/i.test(msg) && /socket/i.test(msg)) return 'スマホの Tsunagu アプリ（v1.3.0 以降）を開いたままにしてから、もう一度お試しください。'
+  if (/underlying connection|closed|broken pipe|rejected/i.test(msg) && /socket/i.test(msg)) return 'スマホの Quick Link アプリ（v1.3.0 以降）を開いたままにしてから、もう一度お試しください。'
   return 'USB 接続に失敗しました' + (msg ? `（${msg}）` : '')
 }
 
@@ -315,8 +332,9 @@ class LanTransport implements Transport {
    Auth is the first frame: the phone checks sha256 of the pairing token / code. */
 const USB_SOCKET = 'localabstract:tsunagu-usb'
 const USB_MAX_FRAME = 16 * 1024 * 1024
-export const usbSupported = () =>
-  typeof navigator !== 'undefined' && !!(navigator as any).usb && !!AdbDaemonWebUsbDeviceManager.BROWSER
+/** WebUSB is the only thing the USB route needs from the browser; the ADB
+ *  libraries themselves are loaded when 「USB で接続」 is pressed. */
+export const usbSupported = () => typeof navigator !== 'undefined' && !!(navigator as any).usb
 
 class UsbTransport implements Transport {
   kind: Via = 'usb'
@@ -397,10 +415,11 @@ class UsbTransport implements Transport {
 class Link {
   state: State
   private subs = new Set<() => void>()
-  private peer?: Peer
+  private peer?: PeerType
   private conn?: Transport
   private pendingLan?: LanTransport
   private lanTrying = false
+  private lanAttemptAt = 0
   private incoming = new Map<string, { parts: Uint8Array[]; t: Transfer }>()
   private toastId = 0
   private lastClip = ''
@@ -411,20 +430,37 @@ class Link {
   private usbT?: UsbTransport
   private usbDevice?: AdbDaemonWebUsbDevice
   private adb?: Adb
-  private cred = new AdbWebCredentialStore('Tsunagu')
+  private cred?: any
+  // ---- liveness / reconnection ----
+  private lastRx = 0
+  private pongs = 0
+  private hbTimer?: number
+  private hbSentAt = 0
+  private healthTimer?: number
+  private reconnectTimer?: number
+  private reconnectAttempts = 0
+  private peerEpoch = 0
+  private connLostAt = 0
+  /** A share (or hand-typed content) waiting for the phone to come back. */
+  private queuedShare?: { files: File[]; text: string; id?: string }
 
   constructor() {
     let code = ls.get('code'); let secret = ls.get('secret')
     if (!code) { code = rand(6); ls.set('code', code) }
     if (!secret) { secret = rand(20); ls.set('secret', secret) }
-    const focusNotif = new URLSearchParams(location.search).get('notif') || undefined
-    this.state = { status: 'starting', code, secret, pushState: pushSupported() ? (ls.get('push') === '1' ? 'on' : 'off') : 'unsupported', pushSynced: false, notifs: [], threads: [], sms: {}, smsMore: {}, smsBusy: {}, smsError: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false, ringing: false, mode: ls.get('mode') === 'cloud' ? 'cloud' : 'auto', lanManual: parseLan(ls.get('lanManual')), lanBusy: false, usbSupported: usbSupported(), usbBusy: false, usbMessage: undefined }
-    this.start()
+    const params = new URLSearchParams(location.search)
+    const focusNotif = params.get('notif') || undefined
+    const sharedId = params.get('shared') || undefined
+    this.state = { status: 'starting', code, secret, pushState: pushSupported() ? (ls.get('push') === '1' ? 'on' : 'off') : 'unsupported', pushSynced: false, notifs: [], threads: [], sms: {}, smsMore: {}, smsBusy: {}, smsError: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false, ringing: false, mode: ls.get('mode') === 'cloud' ? 'cloud' : 'auto', lanManual: parseLan(ls.get('lanManual')), lanBusy: false, usbSupported: usbSupported(), usbBusy: false, usbMessage: undefined, share: null, shareQueued: false, bookUi: ls.get('bookui') === '1', latency: null }
+    void this.start()
     // If we already know the phone's LAN endpoints (learned during a previous
     // pairing), try the direct route right away; keep retrying while offline
     // and upgrade a cloud connection to LAN when the network allows it.
-    this.tryLan()
-    setInterval(() => this.tryLan(), 20000)
+    void this.tryLan()
+    this.startHeartbeat()
+    this.healthTimer = window.setInterval(() => this.health(), 15000)
+    if (sharedId) void this.openShare(sharedId)
+    else if (params.get('share') === '1') void pruneShared()
     // Replies / action taps typed into desktop notifications come back from the
     // service worker; relay them to the phone over the paired connection only.
     navigator.serviceWorker?.addEventListener('message', (e) => {
@@ -439,9 +475,18 @@ class Link {
     })
     void this.refreshPushState()
     void this.drainOfflineQueue()
-    window.addEventListener('focus', () => this.pushClipboard(false))
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) this.pushClipboard(false); this.queuePcInfo() })
-    window.addEventListener('online', () => this.queuePcInfo())
+    window.addEventListener('focus', () => { this.pushClipboard(false); if (!this.conn?.open) this.reconnectNow() })
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return
+      this.pushClipboard(false); this.queuePcInfo()
+      // Waking the device (or switching back to this tab) is the moment the old
+      // socket is most likely dead: check it at once instead of waiting.
+      if (!this.conn?.open) this.reconnectNow()
+      else this.heartbeat()
+    })
+    // Network came back (Wi-Fi roamed, VPN up, hotspot on): stop waiting out the
+    // backoff and try everything again immediately.
+    window.addEventListener('online', () => { this.reconnectAttempts = 0; this.queuePcInfo(); this.reconnectNow() })
     window.addEventListener('offline', () => this.queuePcInfo())
     // Browsers only allow audio after a user gesture: unlock the ring sound on
     // the first interaction so the phone can ring this PC later.
@@ -506,7 +551,7 @@ class Link {
     this.beep()
     this.ringTimer = window.setInterval(() => this.beep(), 1200)
     this.ringStop = window.setTimeout(() => this.stopRing(), 30000)
-    this.notify('スマホから呼び出し中', 'Tsunagu のタブで「停止」を押すと止まります', { key: 'tsunagu-ring' }, true)
+    this.notify('スマホから呼び出し中', 'Quick Link のタブで「停止」を押すと止まります', { key: 'tsunagu-ring' }, true)
     this.send({ t: 'pc_ring_state', on: true })
   }
   stopRing(report = true) {
@@ -548,22 +593,104 @@ class Link {
   get = () => this.state
   private set(p: Partial<State>) { this.state = { ...this.state, ...p }; this.subs.forEach((f) => f()) }
 
-  private start() {
-    this.peer?.destroy()
-    const peer = new Peer('tsunagu-link-' + this.state.code.toLowerCase(), { debug: 0 })
+  /** Starts (or restarts) the PeerJS listener. The library is imported here
+   *  rather than at the top of the module so it never sits on the first paint. */
+  private async start() {
+    const epoch = ++this.peerEpoch
+    try { this.peer?.destroy() } catch {}
+    let Peer: typeof PeerType
+    try {
+      Peer = (await import('peerjs')).default
+    } catch {
+      this.set({ status: 'starting' })
+      this.scheduleReconnect()
+      return
+    }
+    if (epoch !== this.peerEpoch) return // a newer start() already took over
+    let peer: PeerType
+    try {
+      peer = new Peer('tsunagu-link-' + this.state.code.toLowerCase(), { debug: 0 })
+    } catch {
+      this.set({ status: 'starting' })
+      this.scheduleReconnect()
+      return
+    }
     this.peer = peer
-    peer.on('open', () => this.set({ status: this.conn?.open ? 'connected' : 'waiting', error: undefined }))
+    peer.on('open', () => { this.reconnectAttempts = 0; this.set({ status: this.conn?.open ? 'connected' : 'waiting', error: undefined }) })
     peer.on('connection', (c) => this.onConn(new PeerTransport(c), c))
-    peer.on('disconnected', () => { if (!peer.destroyed) setTimeout(() => peer.reconnect(), 2000) })
+    peer.on('disconnected', () => {
+      if (peer.destroyed) return
+      try { peer.reconnect() } catch { setTimeout(() => this.scheduleReconnect(), 1500) }
+    })
     peer.on('error', (e: any) => {
       if (e.type === 'unavailable-id') this.set({ status: 'error', error: 'このコードは別のタブで使用中です。ほかのタブを閉じてください。' })
       else if (e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error') {
         // Offline (no internet at all) is expected when working over a USB cable:
         // never knock a live USB connection back to "starting".
         if (!(this.conn?.kind === 'usb' && this.conn.open)) this.set({ status: 'starting' })
-        setTimeout(() => this.start(), 4000)
+        this.scheduleReconnect()
       }
     })
+  }
+
+  // ---------------- Liveness: heartbeat, dead-link detection, reconnect ----------------
+  /** Ping the phone every few seconds and watch for its answer. A WebRTC data
+   *  channel (cloud or LAN) can stay "open" long after the other end is gone —
+   *  that is what left the connection badge claiming 「接続中」 while nothing
+   *  moved. Silence for HEARTBEAT_DEAD_MS now tears the transport down and
+   *  reconnects, so the badge always reflects a link that answers. */
+  private startHeartbeat() {
+    if (this.hbTimer) return
+    this.hbTimer = window.setInterval(() => this.heartbeat(), HEARTBEAT_MS)
+  }
+  private heartbeat() {
+    const c = this.conn
+    const now = Date.now()
+    if (!c) {
+      if (this.state.status === 'connected') this.set({ status: 'waiting', via: undefined })
+      return
+    }
+    if (!c.open) { this.dropStale('closed'); return }
+    // Silence only means "dead" once this phone has proved it answers pings. An
+    // older app build does not know `ping` and would look silent while healthy.
+    if (this.pongs > 0 && this.lastRx && now - this.lastRx > HEARTBEAT_DEAD_MS) { this.dropStale('silent'); return }
+    this.hbSentAt = now
+    try { c.send({ t: 'ping', ts: now }) } catch { this.dropStale('closed') }
+  }
+  /** A watchdog for everything the heartbeat cannot see: PeerJS fell over while
+   *  no window event fired, or the LAN route became reachable again. */
+  private health() {
+    if (!this.conn?.open) {
+      const p: any = this.peer
+      if (!p || p.destroyed) { void this.start(); return }
+      if (p.disconnected) { try { p.reconnect() } catch { void this.start() } }
+    }
+    if (this.state.mode !== 'cloud') void this.tryLan()
+  }
+  /** Tear down a transport that stopped answering, and start looking again. */
+  private dropStale(reason: 'closed' | 'silent') {
+    const c = this.conn
+    this.conn = undefined
+    this.connLostAt = Date.now()
+    this.set({ status: 'waiting', via: undefined, media: undefined, incomingCall: null, pushSynced: false, sys: null, latency: null })
+    try { c?.close() } catch {}
+    this.stopRing(false)
+    this.toast(reason === 'silent' ? '接続が応答しないため、つなぎ直しています…' : '接続が切れたため、つなぎ直しています…')
+    this.scheduleReconnect(300)
+  }
+  private scheduleReconnect(delay?: number) {
+    const attempt = this.reconnectAttempts++
+    const wait = delay ?? Math.min(15000, 500 * Math.pow(1.7, attempt)) + Math.random() * 500
+    clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = window.setTimeout(() => this.reconnectNow(), wait)
+  }
+  /** Try every route now: the peer (if it died), then the LAN direct link. */
+  private reconnectNow() {
+    if (this.conn?.open) return
+    const p: any = this.peer
+    if (!p || p.destroyed) void this.start()
+    else if (p.disconnected) { try { p.reconnect() } catch { void this.start() } }
+    if (this.state.mode !== 'cloud' && navigator.onLine) void this.tryLan()
   }
 
   regenerate() {
@@ -573,7 +700,7 @@ class Link {
     void this.disablePush()
     this.vapid = undefined; this.pcToken = ''
     const code = rand(6), secret = rand(20); ls.set('code', code); ls.set('secret', secret); ls.set('trusted', '[]'); ls.del('lan')
-    this.conn?.close(); this.pendingLan?.close(); this.set({ code, secret, status: 'starting', device: undefined, via: undefined, pushSynced: false }); this.start()
+    this.conn?.close(); this.pendingLan?.close(); this.set({ code, secret, status: 'starting', device: undefined, via: undefined, pushSynced: false }); void this.start()
   }
 
   get qrText() { return `tsunagu:${this.state.code}:${this.state.secret}` }
@@ -596,18 +723,25 @@ class Link {
     }
     if (this.conn === t) {
       this.conn = undefined
-      this.set({ status: 'waiting', via: undefined, media: undefined, incomingCall: null, pushSynced: false, sys: null })
+      this.connLostAt = Date.now()
+      this.set({ status: 'waiting', via: undefined, media: undefined, incomingCall: null, pushSynced: false, sys: null, latency: null })
       this.stopRing(false)
       this.toast(t.kind === 'usb' ? 'USB ケーブルの接続が切れました' : 'スマートフォンとの接続が切れました')
-      setTimeout(() => this.tryLan(), 3000)
+      this.scheduleReconnect(1000)
     }
   }
 
   private accept(c: Transport, hello: any) {
-    if (this.conn && this.conn !== c) this.conn.close()
+    const previous = this.conn
+    this.conn = c
+    this.lastRx = Date.now()
+    this.pongs = 0
+    this.reconnectAttempts = 0
     if (this.pendingLan === c) this.pendingLan = undefined
     if (c.kind === 'usb') { this.pendingUsb = undefined; this.usbT = c as UsbTransport }
-    this.conn = c
+    // Close the transport we just replaced *after* the new one is in place, so a
+    // late close event can never clear the live connection.
+    if (previous && previous !== c) { try { previous.close() } catch {} }
     let token = hello.token
     const trusted: string[] = JSON.parse(ls.get('trusted') || '[]')
     if (!trusted.includes(token)) { token = rand(24); trusted.push(token); ls.set('trusted', JSON.stringify(trusted.slice(-10))) }
@@ -625,6 +759,9 @@ class Link {
     void this.syncPushSubscription()
     void this.drainOfflineQueue()
     this.toast(`${hello.name} と接続しました`)
+    // Content that was waiting for the phone (a share received while it was
+    // offline, or one sent before the connection came back) goes out now.
+    if (this.queuedShare) setTimeout(() => void this.flushQueuedShare(), 900)
     if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission()
   }
 
@@ -860,13 +997,27 @@ class Link {
     if (this.lanTrying || (this.conn?.kind === 'lan' && this.conn.open) || this.pendingLan) return
     if (this.state.transfers.some((t) => t.state === 'active')) return // never switch transports mid-transfer
     const targets = this.lanTargets(); if (!targets.length) return
+    // A failing network should not be hammered on every health tick: back off
+    // from 5s up to a minute, and reset the moment a probe succeeds.
+    const wait = Math.min(60000, 5000 * Math.pow(1.5, this.lanFailures))
+    if (Date.now() - this.lanAttemptAt < wait) return
+    this.lanAttemptAt = Date.now()
     this.lanTrying = true
+    let ok = false
     try {
-      for (const eps of targets) { if (await this.lanConnect(eps)) break }
+      for (const eps of targets) { if (await this.lanConnect(eps)) { ok = true; break } }
     } catch { /* unreachable / blocked: cloud fallback keeps working */ }
-    finally { this.lanTrying = false }
+    finally {
+      this.lanTrying = false
+      if (ok) this.lanFailures = 0
+      else this.lanFailures = Math.min(8, this.lanFailures + 1)
+    }
   }
+  private lanFailures = 0
   private async lanConnect(eps: LanEps): Promise<boolean> {
+    // Never run two handshakes at once: a stale offer answering late used to
+    // overwrite the live socket's state.
+    this.pendingLan?.close(); this.pendingLan = undefined
     const auth = await this.lanAuth()
     const ip = await firstOk(eps.ips.map(async (ip) => { await this.lanFetch(ip, eps.port, '/ping', { auth }, 1500); return ip }))
     if (this.conn?.kind === 'lan' && this.conn.open) return true
@@ -885,7 +1036,7 @@ class Link {
       const ans = await this.lanFetch(ip, eps.port, '/signal', { auth, sdp }, 12000)
       if (this.pendingLan !== t) return false // superseded / closed meanwhile
       await pc.setRemoteDescription({ type: 'answer', sdp: ans.sdp })
-    } catch { t.close(); return false }
+    } catch { t.close(); if (this.pendingLan === t) this.pendingLan = undefined; return false }
     // If the channel opens but no hello is accepted within 8s, give up on it.
     setTimeout(() => { if (this.pendingLan === t) { this.pendingLan = undefined; t.close() } }, 8000)
     return true
@@ -906,7 +1057,14 @@ class Link {
     if (this.state.transfers.some((t) => t.state === 'active')) { this.toast('ファイル転送中は接続方法を切り替えられません'); return false }
     this.set({ usbBusy: true, usbMessage: undefined })
     try {
-      const manager = AdbDaemonWebUsbDeviceManager.BROWSER!
+      // The ADB stack is large and only the cable route needs it: load it here,
+      // not on the startup path.
+      const adbUsb = await import('@yume-chan/adb-daemon-webusb')
+      const manager = adbUsb.AdbDaemonWebUsbDeviceManager.BROWSER
+      if (!manager) {
+        this.set({ usbMessage: 'このブラウザは USB 接続に対応していません。PC の Chrome か Edge でお試しください。' })
+        return false
+      }
       let device = this.usbDevice
       if (!device) {
         const known = await Promise.resolve(manager.getDevices()).catch(() => [] as AdbDaemonWebUsbDevice[])
@@ -931,6 +1089,11 @@ class Link {
     this.usbT?.close(); this.usbT = undefined
     this.set({ usbMessage: 'USB で接続しています…（スマホに「USB デバッグを許可しますか？」が出たら「許可」を押してください）' })
     try {
+      const [{ Adb, AdbDaemonTransport }, { default: AdbWebCredentialStore }] = await Promise.all([
+        import('@yume-chan/adb'),
+        import('@yume-chan/adb-credential-web'),
+      ])
+      if (!this.cred) this.cred = new AdbWebCredentialStore('Quick Link')
       const connection = await withTimeout(device.connect(), 20000, 'USB デバイスを開けませんでした。ケーブルを差し直してお試しください。')
       // The phone asks for permission the first time: wait for its answer, but
       // never leave the button spinning forever if nobody taps it.
@@ -959,12 +1122,12 @@ class Link {
       setTimeout(() => {
         if (this.pendingUsb !== t) return
         this.pendingUsb = undefined; t.close()
-        this.set({ usbMessage: 'スマホから応答がありません。スマホで Tsunagu アプリ（v1.3.0 以降）を開いたままにしてください。' })
+        this.set({ usbMessage: 'スマホから応答がありません。スマホで Quick Link アプリ（v1.3.0 以降）を開いたままにしてください。' })
       }, 15000)
       return true
     } catch (e: any) {
       const msg = e instanceof UsbNoAppError
-        ? 'スマホの Tsunagu アプリ（v1.3.0 以降）を開いたままにしてから、もう一度お試しください。'
+        ? 'スマホの Quick Link アプリ（v1.3.0 以降）を開いたままにしてから、もう一度お試しください。'
         : usbErrorText(e)
       this.set({ usbMessage: msg }); this.toast(msg)
       try { void this.adb?.close() } catch {}
@@ -987,7 +1150,8 @@ class Link {
     this.set({ usbMessage: undefined })
     if (!this.conn) this.set({ status: this.peer ? 'waiting' : 'starting', via: undefined, media: undefined, incomingCall: null, sys: null })
     this.toast('USB 接続を解除しました')
-    setTimeout(() => this.tryLan(), 500)
+    this.reconnectAttempts = 0
+    setTimeout(() => this.reconnectNow(), 500)
   }
 
   /** Hashes the phone accepts over USB: the pairing token it stored, or the
@@ -1022,6 +1186,11 @@ class Link {
 
   private onData(c: Transport, m: any) {
     if (!m || typeof m !== 'object') return
+    // Any answer (including the heartbeat reply) proves this transport is alive.
+    if (c === this.conn) {
+      this.lastRx = Date.now()
+      if (m.t === 'pong') { this.pongs++; if (m.ts) this.set({ latency: Math.max(0, Date.now() - Number(m.ts)) }) }
+    }
     if (m.t === 'hello') {
       // A better transport wins and the live one is never replaced by a slower
       // route (USB cable > same network > cloud).
@@ -1036,6 +1205,7 @@ class Link {
     if (c !== this.conn) return
     const s = this.state
     switch (m.t) {
+      case 'pong': break
       case 'info': this.set({ info: m.info, ...(m.info?.sys ? { sys: m.info.sys } : {}) }); this.learnLan(m.info?.lan); break
       case 'sys': this.set({ sys: m.sys }); break
       case 'sys_err': this.toast(m.text || '操作できませんでした'); if (m.sys) this.set({ sys: m.sys }); break
@@ -1079,7 +1249,7 @@ class Link {
           break
         }
         const reason = String(m.reason || '')
-        if (reason === 'off') this.toast('スマホの「通知へのアクセス」がオフになっています。スマホの設定 →「通知へのアクセス」で Tsunagu を許可してください')
+        if (reason === 'off') this.toast('スマホの「通知へのアクセス」がオフになっています。スマホの設定 →「通知へのアクセス」で Quick Link を許可してください')
         else if (reason === 'locked') this.toast('この通知はスマホ側で消せません（進行中・消去不可の通知です）')
         else if (reason === 'missing') this.set({ notifs: s.notifs.filter((x) => x.key !== key) })
         else this.toast('通知を消せませんでした')
@@ -1189,8 +1359,21 @@ class Link {
   }
   clearClips() { ls.set('clips', '[]'); this.set({ clips: [] }) }
 
+  /** Wait while the data channel is full. Bounded, so a dead link can never
+   *  leave a send loop spinning forever (the old loop had no way out). */
+  private async drain(c: Transport, limit = 4 * 1024 * 1024, maxMs = 45000): Promise<boolean> {
+    const t0 = Date.now()
+    while (c.buffered() > limit) {
+      if (this.conn !== c || !c.open) return false
+      if (Date.now() - t0 > maxMs) return false
+      await new Promise((r) => setTimeout(r, 30))
+    }
+    return true
+  }
+
   async sendFiles(files: FileList | File[]) {
-    if (!this.conn?.open) { this.toast('スマホが接続されていません'); return }
+    const c = this.conn
+    if (!c?.open) { this.toast('スマホが接続されていません'); return }
     for (const file of Array.from(files)) {
       const id = rand(10)
       const t: Transfer = { id, name: file.name, size: file.size, mime: file.type, done: 0, dir: 'out', state: 'active' }
@@ -1199,8 +1382,7 @@ class Link {
       try {
         for (let off = 0; off < file.size; off += CHUNK) {
           const buf = await file.slice(off, off + CHUNK).arrayBuffer()
-          while (this.conn && this.conn.buffered() > 4 * 1024 * 1024) await new Promise((r) => setTimeout(r, 30))
-          if (!this.conn?.open) throw new Error('closed')
+          if (!(await this.drain(c))) throw new Error('closed')
           this.send({ t: 'file_chunk', id, d: b64(buf) })
           if ((off / CHUNK) % 8 === 0) this.updT(id, { done: off + buf.byteLength })
         }
@@ -1217,7 +1399,7 @@ class Link {
     if (t) { clearTimeout(t); this.smsTimers.delete(tid) }
   }
   private smsErrorText(e: string) {
-    if (e === 'permission') return 'スマホでメッセージ（SMS）の権限が許可されていません。スマホの Tsunagu アプリの「連携する機能」から許可してください。'
+    if (e === 'permission') return 'スマホでメッセージ（SMS）の権限が許可されていません。スマホの Quick Link アプリの「連携する機能」から許可してください。'
     return `メッセージを読み込めませんでした（${e}）`
   }
 
@@ -1238,7 +1420,7 @@ class Link {
       if (!this.state.smsBusy[threadId]) return
       this.set({
         smsBusy: { ...this.state.smsBusy, [threadId]: false },
-        smsError: { ...this.state.smsError, [threadId]: 'スマホから応答がありません。Tsunagu アプリが動いているか確認して、もう一度お試しください。' },
+        smsError: { ...this.state.smsError, [threadId]: 'スマホから応答がありません。Quick Link アプリが動いているか確認して、もう一度お試しください。' },
       })
     }, 15000))
   }
@@ -1270,7 +1452,8 @@ class Link {
   fsMkdir(path: string, name: string) { this.send({ t: 'fs_mkdir', path, name }) }
   fsPerm() { this.send({ t: 'fs_perm' }) }
   async fsUpload(files: FileList | File[], dir: string) {
-    if (!this.conn?.open) { this.toast('スマホが接続されていません'); return }
+    const c = this.conn
+    if (!c?.open) { this.toast('スマホが接続されていません'); return }
     for (const file of Array.from(files)) {
       const id = rand(10)
       const t: Transfer = { id, name: file.name, size: file.size, mime: file.type, done: 0, dir: 'out', state: 'active' }
@@ -1279,8 +1462,7 @@ class Link {
       try {
         for (let off = 0; off < file.size; off += CHUNK) {
           const buf = await file.slice(off, off + CHUNK).arrayBuffer()
-          while (this.conn && this.conn.buffered() > 4 * 1024 * 1024) await new Promise((r) => setTimeout(r, 30))
-          if (!this.conn?.open) throw new Error('closed')
+          if (!(await this.drain(c))) throw new Error('closed')
           this.send({ t: 'fs_put_chunk', id, d: b64(buf) })
           if ((off / CHUNK) % 8 === 0) this.updT(id, { done: off + buf.byteLength })
         }
@@ -1327,7 +1509,88 @@ class Link {
   }
 
   clearTransfers() { this.set({ transfers: this.state.transfers.filter((t) => t.state === 'active') }) }
+
+  // ---------------- Experimental 「Googlebook OS」 desktop UI ----------------
+  setBookUi(on: boolean) {
+    ls.set('bookui', on ? '1' : '0')
+    this.set({ bookUi: on })
+    this.toast(on ? 'Googlebook OS デスクトップUIに切り替えました' : '標準の画面に戻しました')
+  }
+
+  // ---------------- Web Share Target (shared from this computer) ----------------
+  /** The system share sheet handed content to the PWA: show the send sheet. */
+  async openShare(id: string) {
+    const entry = await getShared(id)
+    if (!entry) { this.toast('共有された内容を読み出せませんでした'); return }
+    const text = (entry.text || '').trim()
+    // Some apps put the link in `text` and leave `url` empty, and vice versa.
+    if (!text && entry.url && !(entry.title || '').includes(entry.url)) entry.text = entry.url
+    this.set({ share: entry, shareQueued: false })
+    // Drop ?shared=… from the address bar so a reload does not reopen it.
+    try { history.replaceState(null, '', location.pathname + (new URLSearchParams(location.search).get('notif') ? location.search : '')) } catch {}
+  }
+  closeShare() { this.set({ share: null, shareQueued: false }) }
+
+  /** 「スマートフォンに送信」 for whatever the share sheet delivered (files,
+   *  text, a link, or a title alone). Nothing is dropped: if the phone is not
+   *  connected, the content is held and sent as soon as it is. */
+  async sendShare() {
+    const e = this.state.share
+    if (!e) return
+    const files = e.files.length ? await readSharedFiles(e) : []
+    const text = (e.text || e.url || '').trim()
+    if (!files.length && !text) { this.toast('送る内容がありません'); return }
+    if (!this.conn?.open) {
+      this.queuedShare = { files, text, id: e.id }
+      this.set({ shareQueued: true })
+      this.toast('スマートフォンに接続した時点で送信します')
+      return
+    }
+    this.deliver(files, text, e.title)
+    this.set({ share: null, shareQueued: false })
+    if (e.id) void deleteShared(e.id)
+    this.queuedShare = undefined
+  }
+
+  /** The 共有 screen's own 「スマートフォンに送信」: hand-typed text and picked
+   *  files, sent as one action and queued if the phone is away. */
+  sendToPhone(files: File[], text: string) {
+    const list = Array.from(files || [])
+    const body = (text || '').trim()
+    if (!list.length && !body) { this.toast('送るファイルかテキストを選んでください'); return }
+    if (!this.conn?.open) {
+      this.queuedShare = { files: list, text: body }
+      this.toast('スマートフォンに接続した時点で送信します')
+      return
+    }
+    this.deliver(list, body)
+  }
+
+  private async flushQueuedShare() {
+    const q = this.queuedShare
+    if (!q || !this.conn?.open) return
+    this.queuedShare = undefined
+    this.deliver(q.files, q.text)
+    if (this.state.share?.id === q.id) this.set({ share: null, shareQueued: false })
+    if (q.id) void deleteShared(q.id)
+  }
+
+  /** Files go through the transfer path; text goes to the phone's clipboard and
+   *  the clip history, so a link or a sentence arrives wherever it is needed. */
+  private deliver(files: File[], text: string, title?: string) {
+    const parts: string[] = []
+    if (files.length) { void this.sendFiles(files); parts.push(files.length > 1 ? `ファイル ${files.length} 件` : files[0].name) }
+    const body = text || (files.length ? '' : (title || '').trim())
+    if (body) {
+      this.lastClip = body
+      this.send({ t: 'clip', text: body })
+      this.set({ clips: this.addClip({ text: body, time: Date.now(), from: 'pc' }) })
+      parts.push('テキスト')
+    }
+    this.toast(`スマートフォンに送信しました（${parts.join('・')}）`)
+  }
 }
 
 export const link = new Link()
 ;(window as any).tsunagu = link
+;(window as any).quicklink = link

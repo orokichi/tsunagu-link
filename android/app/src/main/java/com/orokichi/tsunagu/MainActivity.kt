@@ -197,7 +197,7 @@ fun PairScreen(onPaired: () -> Unit) {
     val scan = rememberLauncherForActivityResult(ScanContract()) { r ->
         val parts = r.contents?.split(":")
         if (parts != null && parts.size == 3 && parts[0] == "tsunagu") pair(parts[1], parts[2])
-        else if (r.contents != null) err = "Tsunagu の QR コードではありません"
+        else if (r.contents != null) err = "Quick Link の QR コードではありません"
     }
     val notifPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(Unit) { notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS) }
@@ -288,7 +288,7 @@ fun HomeScreen(onUnpair: () -> Unit) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surfaceContainer,
         topBar = {
-            TopAppBar(title = { Text("Tsunagu", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black) }, actions = {
+            TopAppBar(title = { Text("Quick Link", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Black) }, actions = {
                 IconButton(onClick = { confirmUnpair = true }) { Icon(Icons.Rounded.LinkOff, "ペアリング解除") }
             }, colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceContainer))
         }
@@ -308,7 +308,7 @@ fun HomeScreen(onUnpair: () -> Unit) {
                 PermissionsSection(tick, request = { req.launch(it) })
                 TipsCard()
                 val ver = remember { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() }
-                if (ver != null) Text("Tsunagu v$ver", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                if (ver != null) Text("Quick Link v$ver", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(24.dp))
             }
@@ -420,7 +420,7 @@ fun PcCard(connected: Boolean) {
                     val online = p.optBoolean("online", true)
                     InfoPill(if (online) Icons.Rounded.Wifi else Icons.Rounded.WifiOff, if (online) "オンライン" else "オフライン", highlight = online)
                     val visible = p.optBoolean("visible", true)
-                    InfoPill(if (visible) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff, if (visible) "Tsunagu を表示中" else "バックグラウンド")
+                    InfoPill(if (visible) Icons.Rounded.Visibility else Icons.Rounded.VisibilityOff, if (visible) "Quick Link を表示中" else "バックグラウンド")
                     p.optString("screen").takeIf { it.isNotEmpty() }?.let { InfoPill(Icons.Rounded.DesktopWindows, it) }
                     if (p.optBoolean("pwa")) InfoPill(Icons.Rounded.Apps, "アプリとして実行中")
                 }

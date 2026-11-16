@@ -84,7 +84,7 @@ class LinkService : Service() {
     }
 
     private val main = Handler(Looper.getMainLooper())
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + kotlinx.coroutines.CoroutineExceptionHandler { _, e -> android.util.Log.w("Tsunagu", "handler", e) })
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + kotlinx.coroutines.CoroutineExceptionHandler { _, e -> android.util.Log.w("QuickLink", "handler", e) })
     private var web: WebView? = null
     private var ready = false
     private lateinit var features: Features
@@ -168,6 +168,35 @@ class LinkService : Service() {
     fun connected() = _status.value == "connected"
     fun rewatchMedia() = main.post { features.unwatchMedia(); features.watchMedia() }
 
+    // ---- Liveness ----
+    /** Last moment anything arrived from the PC. The PC pings every few seconds;
+     *  a WebRTC data channel can stay "open" long after the other side is gone
+     *  (Wi-Fi roamed, the Chromebook slept), which used to leave the app claiming
+     *  「接続中」 with nothing moving. */
+    @Volatile private var lastRxAt = System.currentTimeMillis()
+
+    private fun startWatchdog() {
+        scope.launch {
+            while (isActive) {
+                delay(4000)
+                if (!connected() || activeVia == "usb") continue
+                if (System.currentTimeMillis() - lastRxAt < 16_000) continue
+                lastRxAt = System.currentTimeMillis()
+                main.post {
+                    // Drop the live transport and redial the cloud; a fresh LAN
+                    // offer from the PC will take over again if it is reachable.
+                    infoJob?.cancel()
+                    _pc.value = null; _pcRinging.value = false
+                    activeVia = null; _via.value = ""
+                    setStatus("connecting")
+                    js("B.setActive('cloud')")
+                    js("B.kick()")
+                    refreshFg()
+                }
+            }
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -205,6 +234,7 @@ class LinkService : Service() {
             deviceName = { features.hello(Prefs.token(this)).optString("name") },
             onOffer = { sdp -> lanOffer(sdp) },
         ).also { it.start(); lanPort = it.port }
+        startWatchdog()
         // USB cable endpoint: the PC's browser is the ADB host, so it reaches
         // this socket with Wi-Fi, mobile data and the internet all switched off.
         usbServer = runCatching {
@@ -433,7 +463,7 @@ class LinkService : Service() {
         }
         val pi = PendingIntent.getActivity(this, 91, i, PendingIntent.FLAG_IMMUTABLE)
         getSystemService(NotificationManager::class.java).notify(91, Notification.Builder(this, App.CH_EVENT)
-            .setSmallIcon(R.drawable.ic_stat).setContentTitle("Tsunagu").setContentText(text)
+            .setSmallIcon(R.drawable.ic_stat).setContentTitle("Quick Link").setContentText(text)
             .setContentIntent(pi).setAutoCancel(true).build())
         toast("スマホの通知をタップしてください（$text）")
     }
@@ -450,13 +480,17 @@ class LinkService : Service() {
         if (connected() || o.optString("t") == "hello") js("B.send(${JSONObject.quote(o.toString())})")
     }
 
-    /** Sends and waits while the data channel buffer is large (backpressure for files). */
+    /** Sends and waits while the data channel buffer is large (backpressure for files).
+     *  Bounded in time: a link that stops draining must never hang a transfer
+     *  (or the queue behind it) forever. */
     private suspend fun sendAwait(o: JSONObject): Boolean {
+        val deadline = System.currentTimeMillis() + 60_000
         if (activeVia == "usb") {
             // The USB writer thread drains its own queue; wait on that depth.
             var buf = (usbServer?.send(o.toString()) ?: -1).toLong()
             if (buf < 0) return false
             while (buf > 3_000_000L) {
+                if (System.currentTimeMillis() > deadline) return false
                 delay(40)
                 buf = usbServer?.buffered() ?: -1L
                 if (buf < 0) return false
@@ -467,6 +501,8 @@ class LinkService : Service() {
         var buf = r.toLongOrNull() ?: -1
         if (buf < 0) return false
         while (buf > 3_000_000) {
+            if (System.currentTimeMillis() > deadline) return false
+            if (!connected()) return false
             delay(40)
             buf = suspendCancellableCoroutine<String> { c -> js("B.buffered()") { c.resume(it) } }.toLongOrNull() ?: -1
             if (buf < 0) return false
@@ -478,7 +514,11 @@ class LinkService : Service() {
 
     // ---------------- Incoming messages ----------------
     private suspend fun handle(m: JSONObject, via: String = "cloud") {
+        // Every message (the PC's heartbeat included) proves the link is alive.
+        lastRxAt = System.currentTimeMillis()
         when (m.optString("t")) {
+            // Heartbeat answer: the PC measures the round trip with this.
+            "ping" -> send(msg("pong", "ts" to m.optLong("ts")))
             "welcome" -> {
                 val previousToken = Prefs.token(this)
                 val newToken = m.optString("token")
@@ -499,7 +539,7 @@ class LinkService : Service() {
             }
             "push_subscribe" -> {
                 // The PC hands over its browser PushSubscription so the phone
-                // can reach it with Web Push while the Tsunagu page is closed.
+                // can reach it with Web Push while the Quick Link page is closed.
                 // Stored against the pairing token that owns this connection.
                 val token = m.optString("pcToken").ifEmpty { Prefs.token(this) }
                 val sub = m.optJSONObject("subscription")
@@ -616,7 +656,7 @@ class LinkService : Service() {
             "perm_open" -> when (m.optString("which")) {
                 "listener" -> {
                     val i = Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    if (runCatching { startActivity(i); true }.getOrDefault(false)) toast("スマホで Tsunagu の「通知へのアクセス」をオンにしてください")
+                    if (runCatching { startActivity(i); true }.getOrDefault(false)) toast("スマホで Quick Link の「通知へのアクセス」をオンにしてください")
                     else toast("スマホの「設定」→「通知」→「通知へのアクセス」でオンにしてください")
                 }
                 else -> launchApp("fix", "位置情報を許可する")
@@ -657,7 +697,7 @@ class LinkService : Service() {
             "call_end" -> features.endCall()
             "clip" -> m.optString("text").let { t ->
                 lastClip = t
-                withContext(Dispatchers.Main) { getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Tsunagu", t)) }
+                withContext(Dispatchers.Main) { getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Quick Link", t)) }
             }
             "ring" -> withContext(Dispatchers.Main) {
                 if (m.optBoolean("on", true)) { stopVibrate(); ringer?.stop(); ringer = Ringer(this@LinkService).also { it.start() }; toast("スマホを鳴らしています") } else { ringer?.stop(); stopVibrate() }
@@ -869,7 +909,7 @@ class LinkService : Service() {
     private fun fgNotif(text: String): Notification {
         val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, App.CH_LINK)
-            .setSmallIcon(R.drawable.ic_stat).setContentTitle("Tsunagu").setContentText(text)
+            .setSmallIcon(R.drawable.ic_stat).setContentTitle("Quick Link").setContentText(text)
             .setContentIntent(pi).setOngoing(true).setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE).build()
     }
 }
