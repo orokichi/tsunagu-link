@@ -34,12 +34,12 @@ a { color: inherit; text-decoration: none; }
 /* ---- shell: navigation rail (expanded ≥1200 / collapsed) → bottom bar (<600) ---- */
 .app { display: flex; height: 100%; }
 .rail { width: 96px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 16px 0; overflow-y: auto; transition: width .5s var(--spring-soft); }
-.brand { display: flex; flex-direction: column; align-items: center; gap: 4px; font-weight: 780; font-size: 13px; margin-bottom: 12px; }
+.brand { display: flex; flex-direction: column; align-items: center; gap: 4px; font-weight: 780; font-size: 13px; margin-bottom: 12px; flex: none; }
 .brand img { width: 40px; height: 40px; }
 .fab { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; width: 64px; height: 64px; border-radius: 20px; background: var(--md-primary-container); color: var(--md-on-primary-container); cursor: pointer; margin-bottom: 14px; font-size: 12px; font-weight: 650; transition: border-radius .5s var(--spring), transform .4s var(--spring), width .5s var(--spring-soft); box-shadow: 0 2px 8px #0002; }
 .fab:hover { border-radius: 32px; transform: scale(1.04); }
 .fab:active { border-radius: 14px; transform: scale(.94); }
-.nav { background: none; border: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; width: 100%; cursor: pointer; }
+.nav { background: none; border: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; width: 100%; cursor: pointer; flex: none; }
 .nav:disabled { opacity: .38; cursor: default; }
 .nav .pill { position: relative; width: 56px; height: 32px; border-radius: 16px; display: grid; place-items: center; transition: background .3s var(--emph), width .5s var(--spring), border-radius .5s var(--spring); }
 .nav:not(:disabled):hover .pill { background: color-mix(in srgb, var(--md-on-surface) 8%, transparent); }
