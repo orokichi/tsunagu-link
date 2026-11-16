@@ -140,7 +140,7 @@ class QuickLinkAccessibilityService : AccessibilityService() {
         lastHash = 0
     }
 
-    private val tick = object : Runnable {
+    private val tick: Runnable = object : Runnable {
         override fun run() {
             if (!streamOn) return
             val svc = LinkService.instance
@@ -155,7 +155,7 @@ class QuickLinkAccessibilityService : AccessibilityService() {
         }
     }
 
-    private val shotCallback = object : TakeScreenshotCallback {
+    private val shotCallback: TakeScreenshotCallback = object : TakeScreenshotCallback {
         override fun onSuccess(screenshot: ScreenshotResult) {
             val ts = SystemClock.uptimeMillis()
             val buffer = screenshot.hardwareBuffer
