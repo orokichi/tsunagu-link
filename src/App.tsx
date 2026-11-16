@@ -645,7 +645,7 @@ function Settings() {
           <button className="btn tonal" disabled={s.lanBusy} onClick={() => link.connectLocal()}>
             <Icon n="bolt" />{s.lanBusy ? '接続中…' : '今すぐ接続を試す'}
           </button>
-          {target?.manual && <button className="btn text" onClick={() => link.clearManualLan()}><Icon n="restart_alt" />自動検出に戻す</button>}
+          {target?.manual && <button className="btn text" onClick={() => { link.clearManualLan(); setIp('') }}><Icon n="restart_alt" />自動検出に戻す</button>}
         </div>
         <form className="lan-form" onSubmit={(e) => { e.preventDefault(); link.setManualLan(ip, Number(port)) }}>
           <label>スマホの IP アドレス<input inputMode="decimal" placeholder="192.168.1.23" value={ip} onChange={(e) => setIp(e.target.value)} /></label>
@@ -737,7 +737,7 @@ export default function App() {
         <div className="brand"><img src="/icon.svg" alt="" /><span>Tsunagu</span></div>
         {connected && <label className="fab" title="ファイルを共有"><Icon n="share" fill /><span>共有</span><input type="file" multiple hidden onChange={(e) => { if (e.target.files?.length) { link.sendFiles(e.target.files); setView('files') } e.target.value = '' }} /></label>}
         {NAV.map(([k, l, ic]) => (
-          <button key={k} disabled={!connected} className={'nav ' + (view === k && connected ? 'on' : '')} onClick={() => setView(k)}>
+          <button key={k} disabled={!connected && k !== 'settings'} className={'nav ' + (view === k ? 'on' : '')} onClick={() => setView(k)}>
             <span className="pill"><Icon n={ic} fill={view === k} /><span className="pl">{l}</span>{badges[k] ? <em>{badges[k] > 99 ? '99+' : badges[k]}</em> : null}</span><span className="lbl">{l}</span>
           </button>
         ))}
@@ -746,7 +746,7 @@ export default function App() {
       <main>
         {s.incomingCall && <div className="call-banner"><Cookie lobes={8} className="spin"><Icon n="ring_volume" fill /></Cookie><div><div className="overline">着信</div><b>{s.incomingCall.name || s.incomingCall.number || '不明な番号'}</b></div>
           <button className="btn filled danger" onClick={() => link.send({ t: 'call_end' })}><Icon n="call_end" />拒否</button></div>}
-        {!connected ? <Pairing /> :
+        {!connected && view !== 'settings' ? <Pairing /> :
           view === 'home' ? <Home go={setView} /> : view === 'notifs' ? <Notifs /> : view === 'messages' ? <Messages /> :
           view === 'calls' ? <Calls /> : view === 'photos' ? <Photos /> : view === 'files' ? <Files /> :
           view === 'explorer' ? <Explorer /> : view === 'find' ? <Find /> : view === 'clip' ? <Clipboard /> : <Settings />}
