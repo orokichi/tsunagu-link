@@ -5,7 +5,10 @@ const N = window.TsunaguNative;
 //  - "cloud": PeerJS (public signaling) -> WebRTC data channel, as before.
 //  - "lan":   the PC fetches this phone's LAN signaling endpoint (LanServer)
 //             and offers a raw RTCPeerConnection; this side only answers.
-// LAN is preferred when both are up: the native side picks the active
+//  - "usb":   a USB cable: the PC's browser is an ADB host over WebUSB and
+//             opens the local abstract socket served by UsbServer.kt, so this
+//             WebView is not involved at all (no network needed).
+// LAN/USB are preferred when both are up: the native side picks the active
 // transport (B.setActive) based on which one received the PC's "welcome".
 // Raw-channel framing: messages are JSON text (the whole protocol is already
 // JSON-safe: file chunks and photo thumbs travel as base64 strings), framed
@@ -147,7 +150,9 @@ window.B = {
   start(code, helloJson) { target = 'tsunagu-link-' + code.toLowerCase(); hello = JSON.parse(helloJson); retry = 1500; active = 'cloud'; cloudHold = false; closeLan(false); init(); },
   setActive(via) {
     active = via;
-    if (via === 'lan') {
+    if (via === 'lan' || via === 'usb') {
+      // The cable or the same-network link carries everything: stop dialing the
+      // cloud, so nothing tries (and fails) while the phone has no internet.
       cloudHold = true;
       clearTimeout(timer);
       if (conn) { try { conn.close(); } catch (e) {} conn = null; welcomedCloud = false; }
@@ -161,11 +166,14 @@ window.B = {
     }
   },
   kick() {
-    if (active === 'lan') return; // LAN is dialed by the PC; nothing to redial here
+    if (active === 'lan' || active === 'usb') return; // dialed by the PC; nothing to redial here
     if (!conn || !conn.open || !welcomedCloud) { retry = 500; schedule(!peer || !peer.open); }
   },
   stop() { clearTimeout(timer); closeLan(false); try { conn && conn.close(); peer && peer.destroy(); } catch (e) {} conn = null; peer = null; active = 'cloud'; cloudHold = false; st('idle'); },
   send(json) {
+    // The USB cable is written by the native side; never leak a message onto
+    // another transport while it is the live one.
+    if (active === 'usb') return -1;
     const first = active === 'lan' ? 'lan' : 'cloud';
     const order = first === 'lan' ? ['lan', 'cloud'] : ['cloud', 'lan'];
     for (const via of order) {

@@ -344,6 +344,31 @@ main > * { animation: enter .6s var(--spring-soft); }
 .via-chip { display: inline-flex; align-items: center; gap: 5px; margin-top: 8px; font-size: 12px; font-weight: 700; padding: 4px 10px; border-radius: 10px; background: var(--md-surface-container-high); color: var(--md-on-surface-variant); }
 .via-chip .ms { font-size: 16px; }
 .via-chip.lan { background: var(--md-primary-container); color: var(--md-on-primary-container); }
+.via-chip.usb { background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); }
+
+/* ---- USB cable block (pairing screen + 設定) ---- */
+.usb-panel { width: 100%; display: flex; flex-direction: column; gap: 12px; padding: 18px 20px; border-radius: 28px; background: var(--md-surface-container-high); text-align: left; transition: border-radius .5s var(--spring), background .3s, color .3s; }
+.usb-panel.on { background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); border-radius: 36px; }
+.usb-panel.in-settings { padding: 0; background: none; }
+.usb-head { display: flex; align-items: center; gap: 14px; }
+.usb-head .btn { flex: none; }
+.usb-badge { flex: none; width: 46px; height: 46px; border-radius: 16px; background: var(--md-surface-container-lowest); color: var(--md-primary); display: grid; place-items: center; transition: border-radius .5s var(--spring), background .3s, color .3s; }
+.usb-panel.on .usb-badge { border-radius: 50%; background: var(--md-tertiary); color: var(--md-on-tertiary); }
+.usb-badge .ms { font-size: 26px; }
+.usb-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.usb-text b { display: flex; align-items: center; gap: 8px; font-size: 15.5px; font-weight: 720; }
+.usb-text .muted { color: inherit; opacity: .78; line-height: 1.5; }
+.usb-on { font-size: 11px; font-weight: 700; letter-spacing: .03em; padding: 2px 8px; border-radius: 8px; background: var(--md-tertiary); color: var(--md-on-tertiary); }
+.usb-msg { font-size: 13px; line-height: 1.55; padding: 10px 14px; border-radius: 16px; background: var(--md-surface-container-lowest); color: var(--md-on-surface-variant); }
+.usb-msg.ok { background: color-mix(in srgb, var(--md-tertiary) 20%, var(--md-surface-container-lowest)); color: var(--md-on-surface); }
+.usb-panel.on .usb-msg { background: color-mix(in srgb, var(--md-on-tertiary-container) 12%, transparent); color: var(--md-on-tertiary-container); }
+.usb-steps { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; line-height: 1.55; color: var(--md-on-surface-variant); counter-reset: usb; }
+.usb-steps li { display: grid; grid-template-columns: 20px 1fr; gap: 8px; align-items: start; }
+.usb-steps li::before { counter-increment: usb; content: counter(usb); width: 20px; height: 20px; border-radius: 10px; background: var(--md-secondary-container); color: var(--md-on-secondary-container); display: grid; place-items: center; font-size: 11px; font-weight: 700; }
+.usb-panel.in-settings .usb-steps { padding: 0 4px 4px; }
+.or-line { width: 100%; display: flex; align-items: center; gap: 12px; color: var(--md-on-surface-variant); font-size: 12px; font-weight: 700; }
+.or-line::before, .or-line::after { content: ''; flex: 1; height: 1px; background: var(--md-outline-variant); }
+@media (max-width: 599px) { .usb-panel { padding: 16px; } .usb-head { flex-wrap: wrap; } .usb-head .btn { width: 100%; } }
 .kind-chip { flex: none; margin-left: 8px; margin-right: auto; font-size: 10.5px; font-weight: 700; letter-spacing: .04em; padding: 2px 7px; border-radius: 8px; background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); }
 .kind-label { flex: none; font-size: 12.5px; font-weight: 700; padding: 4px 10px; border-radius: 10px; background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); }
 .convo { padding: 0; overflow: hidden !important; }

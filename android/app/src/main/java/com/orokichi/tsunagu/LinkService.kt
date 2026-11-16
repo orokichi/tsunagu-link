@@ -89,6 +89,8 @@ class LinkService : Service() {
     private val fileQueue = kotlinx.coroutines.channels.Channel<Pair<JSONObject, String>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
     // ---- LAN direct connection ----
     private var lanServer: LanServer? = null
+    // ---- USB cable (ADB over WebUSB): no network at all ----
+    private var usbServer: UsbServer? = null
     @Volatile private var activeVia: String? = null
     @Volatile private var lanAnswer: String? = null
     @Volatile private var lanLatch: java.util.concurrent.CountDownLatch? = null
@@ -198,6 +200,38 @@ class LinkService : Service() {
             deviceName = { features.hello(Prefs.token(this)).optString("name") },
             onOffer = { sdp -> lanOffer(sdp) },
         ).also { it.start(); lanPort = it.port }
+        // USB cable endpoint: the PC's browser is the ADB host, so it reaches
+        // this socket with Wi-Fi, mobile data and the internet all switched off.
+        usbServer = runCatching {
+            UsbServer(
+                authHashes = {
+                    val out = HashSet<String>()
+                    val token = Prefs.token(this)
+                    if (token.isNotEmpty()) out.add(sha256Hex(token))
+                    // The pairing code too, so コードを作り直したあとでも繋ぎ直せる.
+                    Prefs.code(this)?.let { out.add(sha256Hex(it)) }
+                    out
+                },
+                hello = { features.hello(Prefs.token(this)) },
+                onMessage = { m ->
+                    val t = m.optString("t")
+                    if (t.startsWith("file_") || t.startsWith("fs_put")) fileQueue.trySend(m to "usb")
+                    else scope.launch { handle(m, "usb") }
+                },
+                onClosed = { main.post { usbClosed() } },
+            ).also { it.start() }
+        }.getOrNull()
+    }
+
+    /** The cable session ended: hand the connection back to the network transports. */
+    private fun usbClosed() {
+        if (activeVia != "usb") return
+        activeVia = null; _via.value = ""
+        infoJob?.cancel()
+        _pc.value = null; _pcRinging.value = false
+        setStatus("connecting")
+        js("B.setActive('cloud')")
+        refreshFg()
     }
 
     /** Hands an SDP offer from the LAN server to the WebView bridge and waits for its answer. */
@@ -238,6 +272,7 @@ class LinkService : Service() {
         _pc.value = null; _pcRinging.value = false
         runCatching { contentResolver.unregisterContentObserver(smsObserver) }
         features.unwatchMedia()
+        usbServer?.stop(); usbServer = null
         lanServer?.stop(); lanServer = null; lanPort = 0
         activeVia = null; _via.value = ""
         ringer?.stop()
@@ -252,7 +287,7 @@ class LinkService : Service() {
     // ---------------- WebView / PeerJS bridge ----------------
     inner class Bridge {
         @JavascriptInterface fun onReady() { main.post { ready = true; boot() } }
-        @JavascriptInterface fun onStatus(s: String) { main.post { if (activeVia != "lan") setStatus(s) } }
+        @JavascriptInterface fun onStatus(s: String) { main.post { if (activeVia == null || activeVia == "cloud") setStatus(s) } }
         @JavascriptInterface fun onMessage(json: String, via: String) {
             val m = runCatching { JSONObject(json) }.getOrNull() ?: return
             val t = m.optString("t")
@@ -312,7 +347,12 @@ class LinkService : Service() {
 
     private fun refreshFg() {
         val text = if (_status.value == "connected") {
-            val route = when (activeVia) { "lan" -> "（同じネットワークで直接接続）"; "cloud" -> "（クラウド経由）"; else -> "" }
+            val route = when (activeVia) {
+                "lan" -> "（同じネットワークで直接接続）"
+                "usb" -> "（USB ケーブルで接続）"
+                "cloud" -> "（クラウド経由）"
+                else -> ""
+            }
             "${Prefs.pcName(this)} と接続中$route"
         } else "PC を探しています…"
         getSystemService(NotificationManager::class.java).notify(1, fgNotif(text))
@@ -322,10 +362,27 @@ class LinkService : Service() {
         main.post { if (ready) web?.evaluateJavascript(code) { r -> cb?.invoke(r ?: "") } else cb?.invoke("-1") }
     }
 
-    fun send(o: JSONObject) { if (connected() || o.optString("t") == "hello") js("B.send(${JSONObject.quote(o.toString())})") }
+    fun send(o: JSONObject) {
+        // While the cable is the live transport everything goes straight to the
+        // USB socket: the WebView's PeerJS/LAN links are idle (and may well be
+        // offline). See usbClosed() for the way back.
+        if (activeVia == "usb") { usbServer?.send(o.toString()); return }
+        if (connected() || o.optString("t") == "hello") js("B.send(${JSONObject.quote(o.toString())})")
+    }
 
     /** Sends and waits while the data channel buffer is large (backpressure for files). */
     private suspend fun sendAwait(o: JSONObject): Boolean {
+        if (activeVia == "usb") {
+            // The USB writer thread drains its own queue; wait on that depth.
+            var buf = (usbServer?.send(o.toString()) ?: -1).toLong()
+            if (buf < 0) return false
+            while (buf > 3_000_000L) {
+                delay(40)
+                buf = usbServer?.buffered() ?: -1L
+                if (buf < 0) return false
+            }
+            return true
+        }
         val r = suspendCancellableCoroutine<String> { c -> js("B.send(${JSONObject.quote(o.toString())})") { c.resume(it) } }
         var buf = r.toLongOrNull() ?: -1
         if (buf < 0) return false

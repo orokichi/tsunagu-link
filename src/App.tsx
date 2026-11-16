@@ -73,7 +73,40 @@ function Pairing() {
           <div className={'chip ' + s.status}><i />{s.status === 'waiting' ? 'スマホからの接続を待っています' : 'サーバーに接続中…'}</div>
           <button className="btn text" onClick={() => link.regenerate()}><Icon n="refresh" />コードを作り直す</button>
         </>}
+        <div className="or-line">または</div>
+        <UsbPanel />
       </section>
+    </div>
+  )
+}
+
+/** USB cable connection block (Pairing screen and 設定). The phone exposes an
+ *  ADB socket, so the browser itself is the ADB host: no adb command on the PC
+ *  and no network at all — it keeps working with Wi-Fi and mobile data off. */
+function UsbPanel({ settings }: { settings?: boolean }) {
+  const s = useLink()
+  const on = s.via === 'usb'
+  return (
+    <div className={'usb-panel' + (on ? ' on' : '') + (settings ? ' in-settings' : '')}>
+      <div className="usb-head">
+        <span className="usb-badge"><Icon n="usb" fill={on} /></span>
+        <div className="usb-text">
+          <b>USB ケーブルで接続{on && <span className="usb-on">接続中</span>}</b>
+          <span className="muted small">ネット（Wi-Fi・モバイル通信）が一切なくても、ケーブルだけで通知・メッセージ・写真・ファイル・クリップボードなどすべてを使えます。PC に adb のインストールは要りません。</span>
+        </div>
+        {on
+          ? <button className="btn text" onClick={() => link.disconnectUsb()}><Icon n="usb_off" />解除</button>
+          : <button className="btn tonal" disabled={s.usbBusy || !s.usbSupported} onClick={() => link.connectUsb()}><Icon n="usb" />{s.usbBusy ? '接続中…' : 'USB で接続'}</button>}
+      </div>
+      {s.usbMessage && <p className={'usb-msg' + (on ? ' ok' : '')}>{s.usbMessage}</p>}
+      {!s.usbSupported && <p className="muted small">このブラウザは USB 接続に対応していません。PC の Chrome か Edge で開いてください。</p>}
+      {!on && s.usbSupported && (
+        <ol className="usb-steps">
+          <li>スマホの「設定」→「デバイス情報」→「ビルド番号」を 7 回タップして開発者向けオプションを表示</li>
+          <li>「開発者向けオプション」→「USB デバッグ」を ON にして、USB ケーブルで PC とつなぐ</li>
+          <li>「USB で接続」を押し、一覧からスマホを選ぶ → スマホに出る「USB デバッグを許可しますか？」で「許可」</li>
+        </ol>
+      )}
     </div>
   )
 }
@@ -118,7 +151,7 @@ function Home({ go }: { go: (v: string) => void }) {
           <h2 className="display">{s.device?.name}</h2>
           <div className="muted">{s.device?.model} · Android {s.device?.android}</div>
           <div className="hero-chips">
-            <span className={'via-chip ' + (s.via || '')}><Icon n={s.via === 'lan' ? 'wifi' : 'cloud'} />{s.via === 'lan' ? '同じネットワークで直接接続' : 'クラウド経由で接続'}</span>
+            <span className={'via-chip ' + (s.via || '')}><Icon n={s.via === 'lan' ? 'wifi' : s.via === 'usb' ? 'usb' : 'cloud'} />{s.via === 'lan' ? '同じネットワークで直接接続' : s.via === 'usb' ? 'USBケーブルで直接接続' : 'クラウド経由で接続'}</span>
             {i?.ringer && <span className="via-chip"><Icon n={s.sys?.ringer === 'silent' ? 'notifications_off' : s.sys?.ringer === 'vibrate' ? 'vibration' : 'notifications_active'} />{i.ringer}</span>}
           </div>
         </div>
@@ -630,7 +663,7 @@ function Settings() {
       <section className="card set-card a-conn">
         <div className="set-head">
           <div><h3>接続方法</h3><p className="muted small">スマホとのつながり方を選びます</p></div>
-          <span className={'via-chip ' + (s.via || '')}><Icon n={s.via === 'lan' ? 'wifi' : 'cloud'} />{s.via === 'lan' ? '同じネットワークで直接接続中' : s.via === 'cloud' ? 'クラウド経由で接続中' : '未接続'}</span>
+          <span className={'via-chip ' + (s.via || '')}><Icon n={s.via === 'lan' ? 'wifi' : s.via === 'usb' ? 'usb' : 'cloud'} />{s.via === 'lan' ? '同じネットワークで直接接続中' : s.via === 'usb' ? 'USB ケーブルで直接接続中' : s.via === 'cloud' ? 'クラウド経由で接続中' : '未接続'}</span>
         </div>
         <div className="set-seg" role="radiogroup" aria-label="接続方法">
           {([['auto', '自動', 'bolt', '同じ Wi-Fi では直接接続し、使えないときはクラウド経由'],
@@ -665,6 +698,13 @@ function Settings() {
           : 'ふだんはスマホが知らせてくる接続先に自動でつなぎます。見つからないときは、スマホの「設定」→「Wi-Fi」で確認できる IP アドレスを入れてください。ポートは通常 47822 です。')}</p>
       </section>
 
+      <section className="card set-card a-usb">
+        <div className="set-head">
+          <div><h3>USB ケーブル接続</h3><p className="muted small">ネットが使えない場所でも、ケーブルだけで全部の機能を使います</p></div>
+        </div>
+        <UsbPanel settings />
+      </section>
+
       <section className="card set-card">
         <div className="set-head"><div><h3>この PC</h3><p className="muted small">スマホのアプリに表示される情報</p></div></div>
         <div className="set-row">
@@ -673,7 +713,7 @@ function Settings() {
           <Stat icon="desktop_windows" label="画面" value={pc.screen} />
           <Stat icon="notifications" label="閉じていても通知" value={s.pushState === 'on' ? '有効' : s.pushState === 'unsupported' ? '非対応' : s.pushState === 'blocked' ? 'ブロック中' : 'オフ'} />
         </div>
-        <p className="muted small">Tsunagu Web v{APP_VERSION} · スマホのアプリを v1.2.0 以降に更新すると、バッテリーセーバーの状態も表示できます（v1.1.0 以降でクイック設定）。</p>
+        <p className="muted small">Tsunagu Web v{APP_VERSION} · USB ケーブル接続はスマホのアプリ v1.3.0 以降で使えます。v1.2.0 以降ならバッテリーセーバーの状態も表示できます。</p>
       </section>
     </div>
   )

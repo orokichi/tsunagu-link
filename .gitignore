@@ -7,3 +7,6 @@ android/build
 android/app/build
 android/local.properties
 .DS_Store
+.tmp/
+hs_err_pid*.log
+replay_pid*.log

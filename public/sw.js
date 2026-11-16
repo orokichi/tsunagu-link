@@ -1,9 +1,14 @@
 /* Tsunagu service worker.
  *
  * Jobs:
- *  1. PWA installability + offline shell. Caching is deliberately network-first
- *     for everything same-origin, so a new deploy always wins over the cache
- *     (no "stale old version" problem); the cache is only an offline fallback.
+ *  1. PWA installability + offline start. The hashed files of the current build
+ *     are injected below by vite.config.ts and precached on install, so the app
+ *     opens with no network at all (USB-cable use on a train, for example).
+ *     Same-origin requests are fetched network-first anyway, so a new deploy
+ *     always wins as soon as the network is there; the cache is the offline
+ *     fallback. Google Fonts (which carries the Material Symbols icon font) is
+ *     cached cache-first, so icons still draw offline instead of showing their
+ *     ligature names.
  *  2. Desktop notifications for mirrored phone notifications, including an
  *     inline text reply action (Chrome). Reply text / action taps are forwarded
  *     to the open Tsunagu page, which relays them to the phone over the paired
@@ -15,14 +20,27 @@
  *     notification is stored in IndexedDB ("offline outbox", shared with the
  *     page) and sent by the page the next time it connects.
  */
-const CACHE = 'tsunagu-shell-v5'
+// Replaced at build time (see offlinePrecache in vite.config.ts).
+const BUILD_ID = 'dev'
+const BUILD_ASSETS = []
+const CACHE = 'tsunagu-shell-' + BUILD_ID
+const FONT_CACHE = 'tsunagu-fonts' // survives builds: fonts never change
+const FONT_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com']
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon.svg',
-  '/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-maskable-512.png', '/apple-touch-icon.png']
+  '/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-maskable-512.png', '/apple-touch-icon.png',
+  ...BUILD_ASSETS]
+// The two stylesheets index.html asks for (the families are fixed there).
+const FONT_CSS = [
+  'https://fonts.googleapis.com/css2?family=Google+Sans+Flex:opsz,wght,ROND@6..144,1..1000,100&family=Noto+Sans+JP:wght@400;500;700&display=swap',
+  'https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,300..700,0..1,-50..200&display=block',
+]
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE)
     await Promise.allSettled(SHELL.map((u) => cache.add(u)))
+    const fonts = await caches.open(FONT_CACHE)
+    await Promise.allSettled(FONT_CSS.map((u) => fonts.add(u)))
     await self.skipWaiting()
   })())
 })
@@ -30,7 +48,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys()
-    await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
+    await Promise.all(keys.filter((k) => k !== CACHE && k !== FONT_CACHE).map((k) => caches.delete(k)))
     await self.clients.claim()
   })())
 })
@@ -39,7 +57,19 @@ self.addEventListener('fetch', (event) => {
   const req = event.request
   if (req.method !== 'GET') return
   const url = new URL(req.url)
-  if (url.origin !== self.location.origin) return // fonts / PeerJS cloud: leave alone
+  // Fonts (the icon font in particular): cache-first, network only on a miss.
+  if (FONT_HOSTS.includes(url.host)) {
+    event.respondWith((async () => {
+      const cache = await caches.open(FONT_CACHE)
+      const hit = await cache.match(req)
+      if (hit) return hit
+      const res = await fetch(req)
+      if (res.ok || res.type === 'opaque') cache.put(req, res.clone())
+      return res
+    })())
+    return
+  }
+  if (url.origin !== self.location.origin) return // PeerJS cloud / push: leave alone
   event.respondWith((async () => {
     const cache = await caches.open(CACHE)
     try {

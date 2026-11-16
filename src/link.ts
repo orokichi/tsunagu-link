@@ -1,7 +1,10 @@
 import Peer, { DataConnection } from 'peerjs'
+import { Adb, AdbDaemonTransport, AdbSocket } from '@yume-chan/adb'
+import { AdbDaemonWebUsbDevice, AdbDaemonWebUsbDeviceManager } from '@yume-chan/adb-daemon-webusb'
+import AdbWebCredentialStore from '@yume-chan/adb-credential-web'
 
 export type Status = 'starting' | 'waiting' | 'connected' | 'error'
-export type Via = 'lan' | 'cloud'
+export type Via = 'lan' | 'cloud' | 'usb'
 export interface Device { name: string; model: string; android: string }
 export interface Info {
   battery: number; charging: boolean; net: string; carrier?: string; storageFree: number; storageTotal: number; ringer?: string; lan?: LanEps
@@ -60,6 +63,10 @@ export interface State {
   lanManual?: LanEps | null
   lanBusy: boolean
   lanMessage?: string
+  /** USB cable (ADB over WebUSB): works with no network at all. */
+  usbSupported: boolean
+  usbBusy: boolean
+  usbMessage?: string
 }
 
 const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -70,7 +77,7 @@ const ls = {
   del: (k: string) => localStorage.removeItem('ts.' + k),
 }
 const CHUNK = 48 * 1024
-export const APP_VERSION = '1.2.1'
+export const APP_VERSION = '1.3.0'
 
 /** Stored LAN endpoint (自動検出 or 手動設定). */
 function parseLan(s: string | null): LanEps | null {
@@ -243,6 +250,29 @@ async function sha256Hex(s: string) {
   return [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('')
 }
 
+/** The phone answered as an ADB device but has no Tsunagu USB socket yet. */
+class UsbNoAppError extends Error {}
+
+/** Rejects (with a spoken-to-the-user reason) if `p` takes longer than `ms`. */
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const to = setTimeout(() => reject(new Error(message)), ms)
+    p.then((v) => { clearTimeout(to); resolve(v) }, (e) => { clearTimeout(to); reject(e) })
+  })
+}
+
+/** Turn WebUSB / ADB failures into something the user can act on. */
+function usbErrorText(e: any): string {
+  const name = String(e?.name || '')
+  const msg = String(e?.message || '')
+  if (/busy/i.test(name) || /busy/i.test(msg)) return 'スマホが他の adb（Android Studio・adb コマンド等）に使われています。それを閉じてから、もう一度お試しください。'
+  if (name === 'NotFoundError') return 'USB デバイスが選ばれませんでした。'
+  if (name === 'SecurityError' || name === 'NetworkError' || name === 'NotAllowedError') return 'USB へのアクセスが許可されませんでした。スマホの画面の確認で「許可」を押してください。'
+  if (name === 'InvalidStateError') return 'USB デバイスが既に使われています。ケーブルを差し直してからお試しください。'
+  if (/underlying connection|closed|broken pipe|rejected/i.test(msg) && /socket/i.test(msg)) return 'スマホの Tsunagu アプリ（v1.3.0 以降）を開いたままにしてから、もう一度お試しください。'
+  return 'USB 接続に失敗しました' + (msg ? `（${msg}）` : '')
+}
+
 class LanTransport implements Transport {
   kind: Via = 'lan'
   onmsg: (m: any) => void = () => {}
@@ -262,6 +292,97 @@ class LanTransport implements Transport {
   buffered() { return this.dc.bufferedAmount }
 }
 
+/* USB cable (ADB over WebUSB).
+
+   The phone exposes a local abstract socket ("tsunagu-usb") in which it speaks
+   the same JSON protocol as the other transports. The browser becomes the ADB
+   host itself over WebUSB, so nothing on the PC has to be installed, and no
+   network (Wi-Fi, mobile data or the internet) is involved at all.
+
+   The ADB socket is a byte stream, so messages are framed here as
+   [length:u32 big-endian][utf8 JSON]; the phone's UsbServer.kt reads the same.
+   Auth is the first frame: the phone checks sha256 of the pairing token / code. */
+const USB_SOCKET = 'localabstract:tsunagu-usb'
+const USB_MAX_FRAME = 16 * 1024 * 1024
+export const usbSupported = () =>
+  typeof navigator !== 'undefined' && !!(navigator as any).usb && !!AdbDaemonWebUsbDeviceManager.BROWSER
+
+class UsbTransport implements Transport {
+  kind: Via = 'usb'
+  onmsg: (m: any) => void = () => {}
+  onclose: () => void = () => {}
+  private closed = false
+  private acc = new Uint8Array(0)
+  private queue: Uint8Array[] = []
+  private queued = 0
+  private writing = false
+  private reader: any
+  private writer: any
+  private dec = new TextDecoder()
+  constructor(private sock: AdbSocket) {
+    this.reader = (sock.readable as any).getReader()
+    this.writer = (sock.writable as any).getWriter()
+    void this.pump()
+  }
+  private async pump() {
+    try {
+      for (;;) {
+        const { value, done } = await this.reader.read()
+        if (done) break
+        if (value) this.feed(value as Uint8Array)
+      }
+    } catch { /* unplugged / closed */ }
+    this.fireClose()
+  }
+  private feed(chunk: Uint8Array) {
+    if (this.closed) return
+    const all = new Uint8Array(this.acc.length + chunk.length)
+    all.set(this.acc); all.set(chunk, this.acc.length)
+    let off = 0
+    while (all.length - off >= 4) {
+      const len = ((all[off] << 24) | (all[off + 1] << 16) | (all[off + 2] << 8) | all[off + 3]) >>> 0
+      if (len === 0 || len > USB_MAX_FRAME) { this.close(); return }
+      if (all.length - off - 4 < len) break
+      const body = all.subarray(off + 4, off + 4 + len)
+      off += 4 + len
+      try { this.onmsg(JSON.parse(this.dec.decode(body))) } catch {}
+    }
+    this.acc = all.slice(off)
+  }
+  private async drain() {
+    if (this.writing) return
+    this.writing = true
+    try {
+      while (this.queue.length && !this.closed) {
+        const f = this.queue.shift()!
+        await this.writer.write(f)
+        this.queued -= f.length
+      }
+    } catch { this.fireClose() }
+    this.writing = false
+  }
+  private fireClose() { if (!this.closed) { this.closed = true; this.onclose() } }
+  get open() { return !this.closed }
+  send(m: any) {
+    if (this.closed) return
+    const body = new TextEncoder().encode(JSON.stringify(m))
+    const f = new Uint8Array(4 + body.length)
+    new DataView(f.buffer).setUint32(0, body.length)
+    f.set(body, 4)
+    this.queue.push(f); this.queued += f.length
+    void this.drain()
+  }
+  close() {
+    if (this.closed) return
+    this.closed = true
+    try { void this.writer?.close() } catch {}
+    try { void this.reader?.cancel() } catch {}
+    try { void (this.sock as any).close?.() } catch {}
+    this.onclose()
+  }
+  buffered() { return this.queued }
+}
+
 class Link {
   state: State
   private subs = new Set<() => void>()
@@ -275,13 +396,18 @@ class Link {
   private vapid?: string
   private pcToken = ''
   private pushEndpoint = ''
+  private pendingUsb?: UsbTransport
+  private usbT?: UsbTransport
+  private usbDevice?: AdbDaemonWebUsbDevice
+  private adb?: Adb
+  private cred = new AdbWebCredentialStore('Tsunagu')
 
   constructor() {
     let code = ls.get('code'); let secret = ls.get('secret')
     if (!code) { code = rand(6); ls.set('code', code) }
     if (!secret) { secret = rand(20); ls.set('secret', secret) }
     const focusNotif = new URLSearchParams(location.search).get('notif') || undefined
-    this.state = { status: 'starting', code, secret, pushState: pushSupported() ? (ls.get('push') === '1' ? 'on' : 'off') : 'unsupported', pushSynced: false, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false, ringing: false, mode: ls.get('mode') === 'cloud' ? 'cloud' : 'auto', lanManual: parseLan(ls.get('lanManual')), lanBusy: false }
+    this.state = { status: 'starting', code, secret, pushState: pushSupported() ? (ls.get('push') === '1' ? 'on' : 'off') : 'unsupported', pushSynced: false, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false, ringing: false, mode: ls.get('mode') === 'cloud' ? 'cloud' : 'auto', lanManual: parseLan(ls.get('lanManual')), lanBusy: false, usbSupported: usbSupported(), usbBusy: false, usbMessage: undefined }
     this.start()
     // If we already know the phone's LAN endpoints (learned during a previous
     // pairing), try the direct route right away; keep retrying while offline
@@ -420,7 +546,12 @@ class Link {
     peer.on('disconnected', () => { if (!peer.destroyed) setTimeout(() => peer.reconnect(), 2000) })
     peer.on('error', (e: any) => {
       if (e.type === 'unavailable-id') this.set({ status: 'error', error: 'このコードは別のタブで使用中です。ほかのタブを閉じてください。' })
-      else if (e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error') { this.set({ status: 'starting' }); setTimeout(() => this.start(), 4000) }
+      else if (e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error') {
+        // Offline (no internet at all) is expected when working over a USB cable:
+        // never knock a live USB connection back to "starting".
+        if (!(this.conn?.kind === 'usb' && this.conn.open)) this.set({ status: 'starting' })
+        setTimeout(() => this.start(), 4000)
+      }
     })
   }
 
@@ -446,11 +577,17 @@ class Link {
 
   private onTransportClose(t: Transport) {
     if (this.pendingLan === t) { this.pendingLan = undefined; return }
+    if (this.pendingUsb === t) { this.pendingUsb = undefined; return }
+    if (t.kind === 'usb') {
+      if (this.usbT === t) this.usbT = undefined
+      try { void this.adb?.close() } catch {}
+      this.adb = undefined
+    }
     if (this.conn === t) {
       this.conn = undefined
       this.set({ status: 'waiting', via: undefined, media: undefined, incomingCall: null, pushSynced: false, sys: null })
       this.stopRing(false)
-      this.toast('スマートフォンとの接続が切れました')
+      this.toast(t.kind === 'usb' ? 'USB ケーブルの接続が切れました' : 'スマートフォンとの接続が切れました')
       setTimeout(() => this.tryLan(), 3000)
     }
   }
@@ -458,6 +595,7 @@ class Link {
   private accept(c: Transport, hello: any) {
     if (this.conn && this.conn !== c) this.conn.close()
     if (this.pendingLan === c) this.pendingLan = undefined
+    if (c.kind === 'usb') { this.pendingUsb = undefined; this.usbT = c as UsbTransport }
     this.conn = c
     let token = hello.token
     const trusted: string[] = JSON.parse(ls.get('trusted') || '[]')
@@ -468,7 +606,7 @@ class Link {
     if (hello.vapid) this.vapid = hello.vapid
     if (hello.seed) ls.set('seed', hello.seed)
     this.learnLan(hello.lan)
-    this.set({ status: 'connected', via: c.kind, device: { name: hello.name, model: hello.model, android: hello.android }, seed: hello.seed || this.state.seed, pending: undefined })
+    this.set({ status: 'connected', via: c.kind, device: { name: hello.name, model: hello.model, android: hello.android }, seed: hello.seed || this.state.seed, pending: undefined, usbMessage: undefined })
     for (const what of ['info', 'notifs', 'media', 'threads', 'calls', 'sys']) this.send({ t: 'get', what })
     this.getPhotos(true)
     // (Re)register the Web Push subscription with this pairing and flush any
@@ -707,6 +845,7 @@ class Link {
   }
   private async tryLan() {
     if (this.state.mode === 'cloud') return
+    if (this.conn?.kind === 'usb' && this.conn.open) return // the cable wins
     if (this.lanTrying || (this.conn?.kind === 'lan' && this.conn.open) || this.pendingLan) return
     if (this.state.transfers.some((t) => t.state === 'active')) return // never switch transports mid-transfer
     const targets = this.lanTargets(); if (!targets.length) return
@@ -741,6 +880,112 @@ class Link {
     return true
   }
 
+  // ---------------- USB cable (ADB over WebUSB) ----------------
+  /** 設定/接続画面: connect over the USB cable — no Wi-Fi, no mobile data and no
+   *  internet needed. A device this page was already allowed to use is reused
+   *  silently; otherwise the browser's device chooser opens. */
+  async connectUsb(): Promise<boolean> {
+    if (!usbSupported()) {
+      this.set({ usbMessage: 'このブラウザは USB 接続に対応していません。PC の Chrome か Edge でお試しください。' })
+      this.toast('このブラウザは USB 接続に対応していません')
+      return false
+    }
+    if (this.state.usbBusy) return false
+    if (this.conn?.kind === 'usb' && this.conn.open) { this.toast('すでに USB ケーブルで接続しています'); return true }
+    if (this.state.transfers.some((t) => t.state === 'active')) { this.toast('ファイル転送中は接続方法を切り替えられません'); return false }
+    this.set({ usbBusy: true, usbMessage: undefined })
+    try {
+      const manager = AdbDaemonWebUsbDeviceManager.BROWSER!
+      let device = this.usbDevice
+      if (!device) {
+        const known = await Promise.resolve(manager.getDevices()).catch(() => [] as AdbDaemonWebUsbDevice[])
+        device = known[0]
+      }
+      if (!device) {
+        this.set({ usbMessage: 'スマホの「USB デバッグ」を ON にして USB ケーブルでつなぎ、一覧からスマホを選んでください。' })
+        device = await Promise.resolve(manager.requestDevice()).catch(() => undefined)
+      }
+      if (!device) { this.set({ usbMessage: 'USB デバイスが選ばれませんでした。' }); return false }
+      return await this.usbOpen(device)
+    } catch (e: any) {
+      const msg = usbErrorText(e)
+      this.set({ usbMessage: msg }); this.toast(msg)
+      return false
+    } finally {
+      this.set({ usbBusy: false })
+    }
+  }
+
+  private async usbOpen(device: AdbDaemonWebUsbDevice): Promise<boolean> {
+    this.usbT?.close(); this.usbT = undefined
+    this.set({ usbMessage: 'USB で接続しています…（スマホに「USB デバッグを許可しますか？」が出たら「許可」を押してください）' })
+    try {
+      const connection = await withTimeout(device.connect(), 20000, 'USB デバイスを開けませんでした。ケーブルを差し直してお試しください。')
+      // The phone asks for permission the first time: wait for its answer, but
+      // never leave the button spinning forever if nobody taps it.
+      const transport = await withTimeout(
+        AdbDaemonTransport.authenticate({ serial: device.serial, connection, credentialStore: this.cred }),
+        90000,
+        'スマホの画面に出る「USB デバッグを許可しますか？」で「許可」を押してください（スマホの画面を見たまま、もう一度お試しください）。',
+      )
+      this.adb = new Adb(transport)
+      let sock: any
+      try {
+        sock = await withTimeout(this.adb.createSocket(USB_SOCKET), 15000, 'no-app')
+      } catch (e: any) {
+        // The ADB link itself is fine — the app just is not serving the USB
+        // socket yet (older build, or 連携サービス stopped).
+        throw new UsbNoAppError(String(e?.message || e))
+      }
+      const t = new UsbTransport(sock)
+      this.pendingUsb = t
+      t.onmsg = (m) => this.onData(t, m)
+      t.onclose = () => this.onTransportClose(t)
+      this.usbDevice = device
+      t.send({ t: 'usb_auth', auth: await this.usbAuthHashes() })
+      // The phone answers with its hello over this socket; silence usually means
+      // an older app build (no USB socket yet) or the app not running.
+      setTimeout(() => {
+        if (this.pendingUsb !== t) return
+        this.pendingUsb = undefined; t.close()
+        this.set({ usbMessage: 'スマホから応答がありません。スマホで Tsunagu アプリ（v1.3.0 以降）を開いたままにしてください。' })
+      }, 15000)
+      return true
+    } catch (e: any) {
+      const msg = e instanceof UsbNoAppError
+        ? 'スマホの Tsunagu アプリ（v1.3.0 以降）を開いたままにしてから、もう一度お試しください。'
+        : usbErrorText(e)
+      this.set({ usbMessage: msg }); this.toast(msg)
+      try { void this.adb?.close() } catch {}
+      this.adb = undefined
+      // A half-opened USB device would make the next attempt fail with "busy".
+      try { void (device.raw as any)?.close?.() } catch {}
+      return false
+    }
+  }
+
+  /** User action: drop the USB link (the other transports take over again). */
+  disconnectUsb() {
+    const t = this.conn?.kind === 'usb' ? this.conn : this.usbT || this.pendingUsb
+    // Detach first so onTransportClose does not report it as an unexpected drop.
+    if (this.conn === t) this.conn = undefined
+    this.pendingUsb = undefined; this.usbT = undefined
+    t?.close()
+    try { void this.adb?.close() } catch {}
+    this.adb = undefined
+    this.set({ usbMessage: undefined })
+    if (!this.conn) this.set({ status: this.peer ? 'waiting' : 'starting', via: undefined, media: undefined, incomingCall: null, sys: null })
+    this.toast('USB 接続を解除しました')
+    setTimeout(() => this.tryLan(), 500)
+  }
+
+  /** Hashes the phone accepts over USB: the pairing token it stored, or the
+   *  pairing code (for a first pairing with no prior connection). */
+  private async usbAuthHashes(): Promise<string[]> {
+    const base = await this.lanAuth()
+    return [...base, await sha256Hex(this.state.code)]
+  }
+
   private notify(title: string, body: string, rich?: { key?: string; reply?: boolean; actions?: string[]; icon?: string; url?: string }, always = false) {
     if ((!always && document.hasFocus()) || !('Notification' in window) || Notification.permission !== 'granted') return
     const icon = rich?.icon ? 'data:image/png;base64,' + rich.icon : '/icons/icon-192.png'
@@ -767,9 +1012,10 @@ class Link {
   private onData(c: Transport, m: any) {
     if (!m || typeof m !== 'object') return
     if (m.t === 'hello') {
-      // LAN is strictly preferred: once it is live, ignore cloud hellos so the
-      // connection never flaps back to the slower route.
-      if (this.conn?.kind === 'lan' && c.kind === 'cloud') return
+      // A better transport wins and the live one is never replaced by a slower
+      // route (USB cable > same network > cloud).
+      const rank: Record<Via, number> = { usb: 3, lan: 2, cloud: 1 }
+      if (this.conn?.open && rank[this.conn.kind] > rank[c.kind]) { c.close(); return }
       if (m.vapid) this.vapid = m.vapid
       const trusted: string[] = JSON.parse(ls.get('trusted') || '[]')
       if (m.token === this.state.secret || trusted.includes(m.token)) this.accept(c, m)

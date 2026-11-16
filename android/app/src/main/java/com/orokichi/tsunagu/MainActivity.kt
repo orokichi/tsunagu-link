@@ -279,7 +279,11 @@ fun StatusHero(connected: Boolean, via: String) {
                 Text(if (connected) Prefs.pcName(ctx) else "PC でページを開いてください", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
                 Text("コード ${Prefs.code(ctx) ?: ""}", style = MaterialTheme.typography.bodyMedium)
                 if (connected && via.isNotEmpty()) Text(
-                    if (via == "lan") "同じネットワークで直接接続中" else "クラウド経由で接続中",
+                    when (via) {
+                        "lan" -> "同じネットワークで直接接続中"
+                        "usb" -> "USB ケーブルで接続中"
+                        else -> "クラウド経由で接続中"
+                    },
                     style = MaterialTheme.typography.bodyMedium, color = cs.onSurfaceVariant
                 )
             }
