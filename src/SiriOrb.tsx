@@ -29,7 +29,7 @@ export default function SiriOrb({ state = 'idle', size = 56, amplitude = 0, clas
   const style = {
     width: size, height: size,
     '--u': size / 56,
-    '--blur': `${Math.max(2, Math.round(size / 8))}px`,
+    '--blur': `${Math.max(2, Math.round(size / 10))}px`,
     '--amp': amp.toFixed(3),
   } as CSSProperties
   return (
