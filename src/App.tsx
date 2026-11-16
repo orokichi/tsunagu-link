@@ -126,9 +126,12 @@ function Home({ go }: { go: (v: string) => void }) {
       </section>
 
       <section className="card battery-card a-battery">
-        <Gauge value={i ? i.battery / 100 : 0} label={i ? i.battery + '%' : '—'} charging={!!i?.charging} />
+        <Gauge value={i ? i.battery / 100 : 0} label={i ? i.battery + '%' : '—'} charging={!!i?.charging} powerSave={!!i?.powerSave} />
         <div className="battery-meta">
-          <b>{i?.charging ? '充電中' : 'バッテリー'}</b>
+          <div className="batt-head">
+            <b>{i?.charging ? '充電中' : 'バッテリー'}</b>
+            {i && <SaverFlag on={i.powerSave} />}
+          </div>
           <Stat icon="signal_cellular_alt" label={i?.carrier || 'ネットワーク'} value={i?.net || '—'} />
           <Stat icon="hard_drive" label="空き容量" value={i ? fmtSize(i.storageFree) : '—'} meter={i ? 1 - i.storageFree / i.storageTotal : 0} />
         </div>
@@ -170,11 +173,20 @@ const Stat = ({ icon, label, value, meter }: { icon: string; label: string; valu
 )
 const Empty = ({ icon, text }: { icon: string; text: string }) => <div className="empty"><Icon n={icon} /><span>{text}</span></div>
 
+/** Battery saver (省電力モード) state shown beside the battery level. App builds
+ *  that do not report it yet show a neutral dash instead of guessing "off". */
+const SaverFlag = ({ on }: { on?: boolean | null }) => (
+  <span className={'batt-flag' + (on === true ? ' on' : '') + (on == null ? ' unknown' : '')}
+    title={on == null ? 'スマホのアプリがバッテリーセーバーの状態をまだ送っていません' : 'スマホのバッテリーセーバー（省電力モード）'}>
+    <Icon n="battery_saver" fill={on === true} />バッテリーセーバー{on == null ? ' —' : on ? ' オン' : ' オフ'}
+  </span>
+)
+
 /** Expressive circular gauge (wavy when charging). */
-function Gauge({ value, label, charging }: { value: number; label: string; charging: boolean }) {
+function Gauge({ value, label, charging, powerSave }: { value: number; label: string; charging: boolean; powerSave?: boolean }) {
   const r = 52, c = 2 * Math.PI * r, v = Math.max(0, Math.min(1, value))
   return (
-    <div className={'gauge' + (charging ? ' charging' : '') + (v <= 0.15 ? ' low' : '')}>
+    <div className={'gauge' + (charging ? ' charging' : '') + (powerSave ? ' saver' : '') + (v <= 0.15 ? ' low' : '')}>
       <svg viewBox="0 0 128 128"><circle className="g-track" cx="64" cy="64" r={r} /><circle className="g-fill" cx="64" cy="64" r={r} strokeDasharray={`${c * v} ${c}`} /></svg>
       <div className="g-in"><Icon n={charging ? 'bolt' : 'battery_horiz_075'} fill /><b>{label}</b></div>
     </div>
@@ -473,10 +485,10 @@ function Files() {
         <div className="qs-device">
           <div className="qs-avatar"><Icon n="smartphone" fill /></div>
           <div className="qs-name">{s.device?.name || 'スマホ'}</div>
-          <div className="muted small">{s.device?.model}{s.info ? ` · バッテリー ${s.info.battery}%${s.info.charging ? '（充電中）' : ''}` : ''}</div>
+          <div className="muted small">{s.device?.model}{s.info ? ` · バッテリー ${s.info.battery}%${s.info.charging ? '（充電中）' : ''}${s.info.powerSave ? ' · バッテリーセーバー オン' : ''}` : ''}</div>
         </div>
         <p className="qs-status muted">{sending.length ? `送信中… ${pct}%` : 'タップしてファイルを選択 — この画面へのドラッグ＆ドロップでも送れます'}</p>
-        <input type="file" multiple hidden onChange={(e) => e.target.files && link.sendFiles(e.target.files)} />
+        <input type="file" multiple hidden onChange={(e) => { if (e.target.files?.length) link.sendFiles(e.target.files); e.target.value = '' }} />
       </label>
       <p className="muted small">受け取ったファイルはスマホの「ダウンロード/Tsunagu」に保存されます。スマホから送るには、Tsunagu アプリの「PC にファイルを送る」か、ギャラリーやファイルアプリの「共有」→「PC に送る」を選びます。</p>
       </div>
@@ -596,11 +608,75 @@ function Clipboard() {
   )
 }
 
+/* ---------- Settings ---------- */
+function Settings() {
+  const s = useLink()
+  const target = link.lanTarget()
+  const [ip, setIp] = useState(target?.manual ? target.eps.ips[0] : '')
+  const [port, setPort] = useState(String(target?.manual ? target.eps.port : 47822))
+  const pc = link.pcInfo()
+  return (
+    <div className="pane settings">
+      <header className="pane-h"><h2 className="display-s">設定</h2></header>
+
+      <section className="card set-card a-conn">
+        <div className="set-head">
+          <div><h3>接続方法</h3><p className="muted small">スマホとのつながり方を選びます</p></div>
+          <span className={'via-chip ' + (s.via || '')}><Icon n={s.via === 'lan' ? 'wifi' : 'cloud'} />{s.via === 'lan' ? '同じネットワークで直接接続中' : s.via === 'cloud' ? 'クラウド経由で接続中' : '未接続'}</span>
+        </div>
+        <div className="set-seg" role="radiogroup" aria-label="接続方法">
+          {([['auto', '自動', 'bolt', '同じ Wi-Fi では直接接続し、使えないときはクラウド経由'],
+             ['cloud', 'クラウドのみ', 'cloud', '常にインターネット経由（LAN は使いません）']] as const).map(([k, l, ic, d]) => (
+            <button key={k} role="radio" aria-checked={s.mode === k} className={s.mode === k ? 'on' : ''} onClick={() => link.setMode(k)}>
+              <Icon n={ic} fill={s.mode === k} />
+              <span><b>{l}</b><span className="small">{d}</span></span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="card set-card a-lan">
+        <div className="set-head">
+          <div><h3>ローカル接続</h3><p className="muted small">同じ Wi-Fi の中だけで、インターネットを経由せずに直接つなぎます</p></div>
+        </div>
+        <div className="set-row">
+          <Stat icon={target?.manual ? 'push_pin' : 'wifi_find'} label={target?.manual ? '手動で指定した接続先' : '自動で見つけた接続先'}
+            value={target ? `${target.eps.ips[0]}:${target.eps.port}` : '未検出'} />
+          <button className="btn tonal" disabled={s.lanBusy} onClick={() => link.connectLocal()}>
+            <Icon n="bolt" />{s.lanBusy ? '接続中…' : '今すぐ接続を試す'}
+          </button>
+          {target?.manual && <button className="btn text" onClick={() => link.clearManualLan()}><Icon n="restart_alt" />自動検出に戻す</button>}
+        </div>
+        <form className="lan-form" onSubmit={(e) => { e.preventDefault(); link.setManualLan(ip, Number(port)) }}>
+          <label>スマホの IP アドレス<input inputMode="decimal" placeholder="192.168.1.23" value={ip} onChange={(e) => setIp(e.target.value)} /></label>
+          <label>ポート<input inputMode="numeric" placeholder="47822" value={port} onChange={(e) => setPort(e.target.value)} /></label>
+          <button className="btn filled"><Icon n="save" />この接続先を使う</button>
+        </form>
+        <p className="muted small">{s.lanMessage || (target?.manual
+          ? '手動で指定した接続先を優先して試します。うまくつながらないときは、スマホが同じ Wi-Fi にいるか、IP アドレスが変わっていないかを確認してください。'
+          : 'ふだんはスマホが知らせてくる接続先に自動でつなぎます。見つからないときは、スマホの「設定」→「Wi-Fi」で確認できる IP アドレスを入れてください。ポートは通常 47822 です。')}</p>
+      </section>
+
+      <section className="card set-card">
+        <div className="set-head"><div><h3>この PC</h3><p className="muted small">スマホのアプリに表示される情報</p></div></div>
+        <div className="set-row">
+          <Stat icon="computer" label="端末" value={pc.name} />
+          <Stat icon="public" label="ブラウザ" value={`${pc.browser} · ${pc.os}`} />
+          <Stat icon="desktop_windows" label="画面" value={pc.screen} />
+          <Stat icon="notifications" label="閉じていても通知" value={s.pushState === 'on' ? '有効' : s.pushState === 'unsupported' ? '非対応' : s.pushState === 'blocked' ? 'ブロック中' : 'オフ'} />
+        </div>
+        <p className="muted small">Tsunagu Web v{APP_VERSION} · スマホのアプリを v1.2.0 以降に更新すると、バッテリーセーバーの状態も表示できます（v1.1.0 以降でクイック設定）。</p>
+      </section>
+    </div>
+  )
+}
+
 /* ---------- Shell ---------- */
 const NAV = [
   ['home', 'ホーム', 'home'], ['notifs', '通知', 'notifications'], ['messages', 'メッセージ', 'chat'],
   ['calls', '通話', 'call'], ['photos', '写真', 'photo_library'], ['files', '共有', 'share'],
   ['explorer', 'エクスプローラー', 'folder_open'], ['find', '探す', 'location_on'], ['clip', 'クリップボード', 'content_paste'],
+  ['settings', '設定', 'settings'],
 ] as const
 
 export default function App() {
@@ -659,7 +735,7 @@ export default function App() {
     <div className={'app ' + (drag ? 'dragging' : '') + (connected ? ' on' : '')}>
       <nav className="rail" aria-label="メイン">
         <div className="brand"><img src="/icon.svg" alt="" /><span>Tsunagu</span></div>
-        {connected && <label className="fab" title="ファイルを共有"><Icon n="share" fill /><span>共有</span><input type="file" multiple hidden onChange={(e) => e.target.files && (link.sendFiles(e.target.files), setView('files'))} /></label>}
+        {connected && <label className="fab" title="ファイルを共有"><Icon n="share" fill /><span>共有</span><input type="file" multiple hidden onChange={(e) => { if (e.target.files?.length) { link.sendFiles(e.target.files); setView('files') } e.target.value = '' }} /></label>}
         {NAV.map(([k, l, ic]) => (
           <button key={k} disabled={!connected} className={'nav ' + (view === k && connected ? 'on' : '')} onClick={() => setView(k)}>
             <span className="pill"><Icon n={ic} fill={view === k} /><span className="pl">{l}</span>{badges[k] ? <em>{badges[k] > 99 ? '99+' : badges[k]}</em> : null}</span><span className="lbl">{l}</span>
@@ -673,7 +749,7 @@ export default function App() {
         {!connected ? <Pairing /> :
           view === 'home' ? <Home go={setView} /> : view === 'notifs' ? <Notifs /> : view === 'messages' ? <Messages /> :
           view === 'calls' ? <Calls /> : view === 'photos' ? <Photos /> : view === 'files' ? <Files /> :
-          view === 'explorer' ? <Explorer /> : view === 'find' ? <Find /> : <Clipboard />}
+          view === 'explorer' ? <Explorer /> : view === 'find' ? <Find /> : view === 'clip' ? <Clipboard /> : <Settings />}
       </main>
       {s.pending && <div className="scrim"><div className="dialog"><Cookie lobes={6}><Icon n="phonelink_lock" /></Cookie><h3>{s.pending.name} が接続しようとしています</h3><p className="muted">コード入力で接続したデバイスです。許可すると、次回からは自動で接続されます。</p>
         <div className="dialog-actions"><button className="btn text" onClick={s.pending.reject}>拒否</button><button className="btn filled" onClick={s.pending.accept}>許可</button></div></div></div>}

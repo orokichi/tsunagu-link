@@ -97,10 +97,12 @@ class Features(private val ctx: Context) {
             else -> "接続中"
         }
         val tm = ctx.getSystemService(TelephonyManager::class.java)
+        // Battery saver (省電力モード): shown next to the battery level on the PC.
+        val powerSave = ctx.getSystemService(android.os.PowerManager::class.java)?.isPowerSaveMode ?: false
         val st = StatFs(Environment.getDataDirectory().path)
         val am = ctx.getSystemService(AudioManager::class.java)
         val ringer = when (am.ringerMode) { AudioManager.RINGER_MODE_SILENT -> "サイレント"; AudioManager.RINGER_MODE_VIBRATE -> "バイブ"; else -> "着信音" }
-        return JSONObject().put("battery", level).put("charging", plugged).put("net", net)
+        return JSONObject().put("battery", level).put("charging", plugged).put("powerSave", powerSave).put("net", net)
             .put("carrier", tm?.networkOperatorName?.takeIf { it.isNotBlank() } ?: JSONObject.NULL)
             .put("storageFree", st.availableBytes).put("storageTotal", st.totalBytes).put("ringer", ringer)
             .put("lan", lanJson())

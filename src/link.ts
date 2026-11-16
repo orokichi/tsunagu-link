@@ -3,8 +3,16 @@ import Peer, { DataConnection } from 'peerjs'
 export type Status = 'starting' | 'waiting' | 'connected' | 'error'
 export type Via = 'lan' | 'cloud'
 export interface Device { name: string; model: string; android: string }
-export interface Info { battery: number; charging: boolean; net: string; carrier?: string; storageFree: number; storageTotal: number; ringer?: string; lan?: LanEps }
+export interface Info {
+  battery: number; charging: boolean; net: string; carrier?: string; storageFree: number; storageTotal: number; ringer?: string; lan?: LanEps
+  /** Phone's battery saver / power-saving mode. Older app builds do not send
+   *  it (undefined); the card then shows the state as unknown. */
+  powerSave?: boolean | null
+}
 export interface LanEps { ips: string[]; port: number }
+/** How this PC chooses its transport: 'auto' prefers the LAN direct route and
+ *  falls back to the cloud; 'cloud' never uses the local route. */
+export type LinkMode = 'auto' | 'cloud'
 /** Phone system controls reported by the app (クイック設定). */
 export interface Sys {
   rotate: boolean | null; canWrite: boolean
@@ -47,6 +55,11 @@ export interface State {
   ringing: boolean
   /** Text the phone sent to this PC (「PC にテキストを送る」). */
   inbox?: { text: string; time: number } | null
+  /** Transport preference and the manual LAN endpoint (設定). */
+  mode: LinkMode
+  lanManual?: LanEps | null
+  lanBusy: boolean
+  lanMessage?: string
 }
 
 const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -57,7 +70,16 @@ const ls = {
   del: (k: string) => localStorage.removeItem('ts.' + k),
 }
 const CHUNK = 48 * 1024
-export const APP_VERSION = '1.1.0'
+export const APP_VERSION = '1.2.0'
+
+/** Stored LAN endpoint (自動検出 or 手動設定). */
+function parseLan(s: string | null): LanEps | null {
+  try {
+    const v = JSON.parse(s || 'null')
+    if (v && Array.isArray(v.ips) && v.ips.length && v.port > 0) return { ips: v.ips.slice(0, 4), port: v.port }
+  } catch {}
+  return null
+}
 
 function b64(buf: ArrayBuffer) {
   const u = new Uint8Array(buf); let s = ''
@@ -259,7 +281,7 @@ class Link {
     if (!code) { code = rand(6); ls.set('code', code) }
     if (!secret) { secret = rand(20); ls.set('secret', secret) }
     const focusNotif = new URLSearchParams(location.search).get('notif') || undefined
-    this.state = { status: 'starting', code, secret, pushState: pushSupported() ? (ls.get('push') === '1' ? 'on' : 'off') : 'unsupported', pushSynced: false, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false, ringing: false }
+    this.state = { status: 'starting', code, secret, pushState: pushSupported() ? (ls.get('push') === '1' ? 'on' : 'off') : 'unsupported', pushSynced: false, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false, ringing: false, mode: ls.get('mode') === 'cloud' ? 'cloud' : 'auto', lanManual: parseLan(ls.get('lanManual')), lanBusy: false }
     this.start()
     // If we already know the phone's LAN endpoints (learned during a previous
     // pairing), try the direct route right away; keep retrying while offline
@@ -588,8 +610,83 @@ class Link {
   }
 
   // ---------------- LAN direct connection ----------------
-  private lanEps(): LanEps | null {
-    try { const v = JSON.parse(ls.get('lan') || 'null'); return v && Array.isArray(v.ips) && v.ips.length && v.port > 0 ? v : null } catch { return null }
+  /** Endpoints to try, in order: the one typed in 設定 first, then the ones the
+   *  phone reported while pairing. */
+  private lanTargets(): LanEps[] {
+    const out: LanEps[] = []
+    const manual = parseLan(ls.get('lanManual'))
+    if (manual) out.push(manual)
+    const learned = parseLan(ls.get('lan'))
+    if (learned) out.push(learned)
+    return out
+  }
+  /** The endpoint 設定 shows and 「今すぐ接続を試す」 uses. */
+  lanTarget(): { eps: LanEps; manual: boolean } | null {
+    const manual = parseLan(ls.get('lanManual'))
+    if (manual) return { eps: manual, manual: true }
+    const learned = parseLan(ls.get('lan'))
+    return learned ? { eps: learned, manual: false } : null
+  }
+  private lanEps(): LanEps | null { return this.lanTargets()[0] || null }
+
+  /** 設定: choose the transport preference. */
+  setMode(mode: LinkMode) {
+    if (mode === this.state.mode) return
+    ls.set('mode', mode); this.set({ mode, lanMessage: undefined })
+    if (mode === 'cloud') {
+      const c = this.conn
+      if (c && c.kind === 'lan') {
+        this.conn = undefined; this.pendingLan?.close(); this.pendingLan = undefined
+        c.close(); this.set({ status: 'waiting', via: undefined })
+      }
+      this.toast('クラウド経由で接続します（同じネットワークでも直接接続しません）')
+    } else {
+      this.toast('同じネットワークでは直接接続を試みます')
+      void this.tryLan()
+    }
+  }
+
+  /** 設定: remember a manually typed LAN endpoint (e.g. a fixed IP the phone
+   *  never announces) and try it right away. */
+  setManualLan(ip: string, port: number): boolean {
+    const host = ip.trim()
+    const octets = host.split('.')
+    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(host) || octets.some((n) => Number(n) > 255)) {
+      this.toast('IP アドレスを正しく入力してください（例: 192.168.1.23）'); return false
+    }
+    if (!(port >= 1 && port <= 65535)) { this.toast('ポート番号を確認してください（通常は 47822）'); return false }
+    const eps: LanEps = { ips: [host], port }
+    ls.set('lanManual', JSON.stringify(eps))
+    if (this.state.mode === 'cloud') this.setMode('auto')
+    this.set({ lanManual: eps })
+    this.toast('ローカル接続先を保存しました')
+    void this.connectLocal()
+    return true
+  }
+  clearManualLan() {
+    ls.del('lanManual')
+    this.set({ lanManual: undefined, lanMessage: undefined })
+    this.toast('自動検出に戻しました')
+    void this.tryLan()
+  }
+
+  /** 設定: try the local route now and report the result here and as a toast. */
+  async connectLocal(): Promise<boolean> {
+    if (this.state.mode === 'cloud') { this.toast('接続方法が「クラウドのみ」になっています'); return false }
+    const target = this.lanTarget()
+    if (!target) { this.toast('ローカル接続先がまだ分かりません。スマホと一度つないでください'); return false }
+    const { eps } = target
+    const where = `${eps.ips[0]}:${eps.port}`
+    if (this.conn?.kind === 'lan' && this.conn.open) { this.toast('すでに同じネットワークで直接接続しています'); return true }
+    if (this.state.transfers.some((t) => t.state === 'active')) { this.toast('ファイル転送中は接続方法を切り替えられません'); return false }
+    this.pendingLan?.close(); this.pendingLan = undefined
+    this.set({ lanBusy: true, lanMessage: undefined })
+    let ok = false
+    try { ok = await this.lanConnect(eps) } finally {
+      this.set({ lanBusy: false, lanMessage: ok ? `${where} に接続を試みました（応答待ち）` : `${where} に接続できませんでした` })
+    }
+    this.toast(ok ? '同じネットワークでの直接接続を試しています…' : `ローカル接続できません: ${where}（同じ Wi-Fi・IP・ポートを確認）`)
+    return ok
   }
   private learnLan(lan: any) {
     if (!lan || !Array.isArray(lan.ips) || !lan.ips.length || !(lan.port > 0)) return
@@ -609,17 +706,20 @@ class Link {
     } finally { clearTimeout(to) }
   }
   private async tryLan() {
+    if (this.state.mode === 'cloud') return
     if (this.lanTrying || (this.conn?.kind === 'lan' && this.conn.open) || this.pendingLan) return
     if (this.state.transfers.some((t) => t.state === 'active')) return // never switch transports mid-transfer
-    const eps = this.lanEps(); if (!eps) return
+    const targets = this.lanTargets(); if (!targets.length) return
     this.lanTrying = true
-    try { await this.lanConnect(eps) } catch { /* unreachable / blocked: cloud fallback keeps working */ }
+    try {
+      for (const eps of targets) { if (await this.lanConnect(eps)) break }
+    } catch { /* unreachable / blocked: cloud fallback keeps working */ }
     finally { this.lanTrying = false }
   }
-  private async lanConnect(eps: LanEps) {
+  private async lanConnect(eps: LanEps): Promise<boolean> {
     const auth = await this.lanAuth()
     const ip = await firstOk(eps.ips.map(async (ip) => { await this.lanFetch(ip, eps.port, '/ping', { auth }, 1500); return ip }))
-    if (this.conn?.kind === 'lan' && this.conn.open) return
+    if (this.conn?.kind === 'lan' && this.conn.open) return true
     const pc = new RTCPeerConnection({ iceServers: [] })
     const dc = pc.createDataChannel('tsunagu')
     const t = new LanTransport(pc, dc)
@@ -633,11 +733,12 @@ class Link {
       const sdp = pc.localDescription?.sdp
       if (!sdp) throw new Error('no local sdp')
       const ans = await this.lanFetch(ip, eps.port, '/signal', { auth, sdp }, 12000)
-      if (this.pendingLan !== t) return // superseded / closed meanwhile
+      if (this.pendingLan !== t) return false // superseded / closed meanwhile
       await pc.setRemoteDescription({ type: 'answer', sdp: ans.sdp })
-    } catch { t.close(); return }
+    } catch { t.close(); return false }
     // If the channel opens but no hello is accepted within 8s, give up on it.
     setTimeout(() => { if (this.pendingLan === t) { this.pendingLan = undefined; t.close() } }, 8000)
+    return true
   }
 
   private notify(title: string, body: string, rich?: { key?: string; reply?: boolean; actions?: string[]; icon?: string; url?: string }, always = false) {

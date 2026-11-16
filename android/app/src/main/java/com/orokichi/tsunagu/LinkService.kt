@@ -116,6 +116,11 @@ class LinkService : Service() {
             if (sig != lastSig) { lastSig = sig; if (connected()) sendInfo() }
         }
     }
+    // Battery saver on/off is not carried by ACTION_BATTERY_CHANGED: its own
+    // broadcast keeps the PC's battery-saver chip in step the moment it changes.
+    private val powerSave = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) { if (connected()) sendInfo() }
+    }
 
     // ---- Quick settings (rotation / ringer / DND / media volume) → PC ----
     private var sysPushJob: Job? = null
@@ -166,6 +171,9 @@ class LinkService : Service() {
         createWeb()
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(net)
         registerReceiver(battery, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        runCatching {
+            registerReceiver(powerSave, IntentFilter(android.os.PowerManager.ACTION_POWER_SAVE_MODE_CHANGED))
+        }
         runCatching {
             val f = IntentFilter().apply {
                 addAction("android.media.VOLUME_CHANGED_ACTION")
@@ -224,6 +232,7 @@ class LinkService : Service() {
         instance = null
         runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(net) }
         runCatching { unregisterReceiver(battery) }
+        runCatching { unregisterReceiver(powerSave) }
         runCatching { unregisterReceiver(sysReceiver) }
         runCatching { contentResolver.unregisterContentObserver(rotationObserver) }
         _pc.value = null; _pcRinging.value = false

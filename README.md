@@ -15,12 +15,13 @@ PC と Android をシームレスにつなぐ連携システム。Windows の「
 | 写真と動画 | 最近のメディアをサムネイルで閲覧、選んで PC に保存 |
 | ファイル共有 | PC→スマホ（ドラッグ&ドロップ、ダウンロード/Tsunagu に保存）、スマホ→PC（共有メニュー「PC に送る」/アプリ内） |
 | クイック設定 | PC から自動回転・着信モード（着信音/バイブ/ミュート）・サイレントモード・メディア音量を操作（要「システム設定の変更」「サイレントモードへのアクセス」） |
+| 設定 | 接続方法（自動／クラウドのみ）の切り替え、ローカル接続先（スマホの IP とポート）の手動指定と接続テスト |
 | スマホ → PC | 接続中の PC（種類・ブラウザ・OS・バッテリー・オンライン）を表示し、PC でリンクを開く・テキスト送信・PC に通知・PC を鳴らす |
 | クリップボード | 双方向同期。PC はタブ復帰時、スマホはアプリ表示時・クイック設定タイル・テキスト共有 |
-| その他 | メディア操作と音量、スマホを鳴らす（マナーモードでも）、リンクを開く、電池・回線・容量・着信モード |
+| その他 | メディア操作と音量、スマホを鳴らす（マナーモードでも）、リンクを開く、電池・バッテリーセーバー・回線・容量・着信モード |
 
 ## 構成
-- 通信: WebRTC DataChannel（端末間 P2P・暗号化）。同一 LAN ではスマホ側の認証付きシグナリング受け口（PNA 対応 HTTP）で直接接続し、トラフィックはインターネットを経由しない。LAN が使えない環境では PeerJS クラウド経由にフォールバック（シグナリングのみクラウド）
+- 通信: WebRTC DataChannel（端末間 P2P・暗号化）。同一 LAN ではスマホ側の認証付きシグナリング受け口（PNA 対応 HTTP）で直接接続し、トラフィックはインターネットを経由しない。接続先はスマホが知らせる IP を自動で使い、設定タブで IP とポートを手動指定もできる。LAN が使えない環境では PeerJS クラウド経由にフォールバック（シグナリングのみクラウド）
 - `/` Web: Vite + React + TypeScript、@material/material-color-utilities
 - `/android` Android: Kotlin + Jetpack Compose（Material 3 Expressive: MaterialExpressiveTheme / MotionScheme.expressive / MaterialShapes / LoadingIndicator / WavyProgress）。接続はフォアグラウンドサービス内のヘッドレス WebView（PeerJS）で維持し、通知リスナー・SMS・通話・MediaStore・MediaSession などネイティブ API とブリッジ
 
