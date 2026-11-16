@@ -51,11 +51,34 @@ class NotifListener : NotificationListenerService() {
         LinkService.instance?.onNotificationRemoved(sbn.key)
     }
 
-    fun items(): List<JSONObject> = (activeNotifications ?: emptyArray()).sortedByDescending { it.postTime }.mapNotNull { serialize(it) }.take(80)
+    /**
+     * What the PC's list shows.
+     *
+     * Group summaries are normally left out: on a grouped notification (LINE,
+     * Google Messages, Gmail…) the summary only repeats the last child. But an
+     * app can also leave a summary behind after its children are gone, and then
+     * the shade keeps a notification that the PC never showed and therefore
+     * could never clear — so a summary with no children in its group is listed
+     * (and can be dismissed).
+     */
+    fun items(): List<JSONObject> {
+        val all = activeNotifications ?: return emptyList()
+        val groupsWithChildren = HashSet<String>()
+        all.forEach { sbn ->
+            if (!isSummary(sbn)) sbn.groupKey?.let { groupsWithChildren.add(it) }
+        }
+        return all.filter { sbn ->
+            !isSummary(sbn) || sbn.groupKey == null || sbn.groupKey !in groupsWithChildren
+        }.sortedByDescending { it.postTime }.mapNotNull { serialize(it) }.take(80)
+    }
+
+    private fun isSummary(sbn: StatusBarNotification) =
+        (sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0
 
     private fun serialize(sbn: StatusBarNotification): JSONObject? {
         val n = sbn.notification
-        if (sbn.packageName == packageName || sbn.isOngoing || (n.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return null
+        if (sbn.packageName == packageName || sbn.isOngoing) return null
+        if (isSummary(sbn) && sbn.groupKey != null && (activeNotifications ?: emptyArray()).any { it.groupKey == sbn.groupKey && !isSummary(it) }) return null
         val ex = n.extras
         val title = ex.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
         val text = (ex.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: ex.getCharSequence(Notification.EXTRA_TEXT))?.toString() ?: ""
@@ -72,7 +95,39 @@ class NotifListener : NotificationListenerService() {
 
     private fun find(key: String) = activeNotifications?.firstOrNull { it.key == key }
 
-    fun dismiss(key: String) { if (key == "*") cancelAllNotifications() else cancelNotification(key) }
+    fun isActive(key: String) = find(key) != null
+
+    /**
+     * Cancels [key] ("*" = everything) and handles the group around it.
+     *
+     * Messaging apps post each message as a child of a group whose summary is a
+     * separate notification carrying the same text. Cancelling only the child
+     * leaves the app's summary in the shade, which is exactly what "the
+     * notification won't go away" looks like. Cancelling the summary while other
+     * children remain, on the other hand, cancels the whole group — so the
+     * summary goes only once its last child is dismissed.
+     *
+     * Returns false with a reason when nothing was cancelled:
+     *   "off"     → the notification listener is not enabled
+     *   "missing" → the notification is already gone
+     */
+    fun dismiss(key: String): Pair<Boolean, String> {
+        if (key.isEmpty()) return false to "missing"
+        if (key == "*") {
+            runCatching { cancelAllNotifications() }
+            return true to ""
+        }
+        val target = find(key) ?: return false to "missing"
+        val group = target.groupKey
+        val siblings = if (group != null) (activeNotifications ?: emptyArray()).filter { it.groupKey == group } else emptyList()
+        val otherChildren = siblings.filter { it.key != key && !isSummary(it) }
+        runCatching { cancelNotification(key) }
+        if (group != null && otherChildren.isEmpty()) {
+            // Last message of the group: drop the summary with it.
+            siblings.filter { isSummary(it) }.forEach { runCatching { cancelNotification(it.key) } }
+        }
+        return true to ""
+    }
 
     fun reply(key: String, text: String): Boolean {
         val a = find(key)?.notification?.actions?.firstOrNull { it.remoteInputs?.isNotEmpty() == true } ?: return false

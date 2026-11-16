@@ -46,10 +46,21 @@ export interface State {
   device?: Device; info?: Info; seed?: string; via?: Via
   notifs: Notif[]; media?: Media | null
   threads: Thread[]; sms: Record<string, Sms[]>
+  /** Older pages still exist on the phone (the conversation is paged in
+   *  newest-first slices so a long history never has to cross in one message). */
+  smsMore: Record<string, boolean>
+  smsBusy: Record<string, boolean>
+  smsError: Record<string, string | undefined>
+  threadsError?: string
+  notifsError?: string
   calls: Call[]; photos: Photo[]; photosMore: boolean
   transfers: Transfer[]; clips: Clip[]; toasts: Toast[]
   fsPath: string; fsItems: FsItem[]; fsAccess: boolean; fsReady: boolean
   loc?: LocFix | null; locError?: string; locBusy: boolean
+  /** How the phone's location permission is set: 「常に許可」 or 「使用中のみ」, and
+   *  whether the link service currently holds a location foreground service. */
+  locMode?: 'always' | 'while_in_use'
+  locFg?: boolean
   pending?: { name: string; accept: () => void; reject: () => void }
   incomingCall?: { number: string; name?: string } | null
   focusNotif?: string
@@ -77,7 +88,7 @@ const ls = {
   del: (k: string) => localStorage.removeItem('ts.' + k),
 }
 const CHUNK = 48 * 1024
-export const APP_VERSION = '1.3.0'
+export const APP_VERSION = '1.3.1'
 
 /** Stored LAN endpoint (自動検出 or 手動設定). */
 function parseLan(s: string | null): LanEps | null {
@@ -407,7 +418,7 @@ class Link {
     if (!code) { code = rand(6); ls.set('code', code) }
     if (!secret) { secret = rand(20); ls.set('secret', secret) }
     const focusNotif = new URLSearchParams(location.search).get('notif') || undefined
-    this.state = { status: 'starting', code, secret, pushState: pushSupported() ? (ls.get('push') === '1' ? 'on' : 'off') : 'unsupported', pushSynced: false, notifs: [], threads: [], sms: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false, ringing: false, mode: ls.get('mode') === 'cloud' ? 'cloud' : 'auto', lanManual: parseLan(ls.get('lanManual')), lanBusy: false, usbSupported: usbSupported(), usbBusy: false, usbMessage: undefined }
+    this.state = { status: 'starting', code, secret, pushState: pushSupported() ? (ls.get('push') === '1' ? 'on' : 'off') : 'unsupported', pushSynced: false, notifs: [], threads: [], sms: {}, smsMore: {}, smsBusy: {}, smsError: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false, ringing: false, mode: ls.get('mode') === 'cloud' ? 'cloud' : 'auto', lanManual: parseLan(ls.get('lanManual')), lanBusy: false, usbSupported: usbSupported(), usbBusy: false, usbMessage: undefined }
     this.start()
     // If we already know the phone's LAN endpoints (learned during a previous
     // pairing), try the direct route right away; keep retrying while offline
@@ -1050,7 +1061,7 @@ class Link {
         else this.set({ pushSynced: false })
         break
       }
-      case 'notifs': this.set({ notifs: m.items }); break
+      case 'notifs': this.set({ notifs: m.items || [], notifsError: m.error || undefined }); break
       case 'notif': {
         const n: Notif = m.item
         this.set({ notifs: [n, ...s.notifs.filter((x) => x.key !== n.key)] })
@@ -1058,6 +1069,22 @@ class Link {
         break
       }
       case 'notif_rm': this.set({ notifs: s.notifs.filter((x) => x.key !== m.key) }); break
+      // Result of a dismiss: say why when the phone could not clear it, instead
+      // of leaving the row on screen with no explanation.
+      case 'notif_dismiss_result': {
+        const key = String(m.key || '')
+        if (m.ok) {
+          if (key === '*') setTimeout(() => this.send({ t: 'get', what: 'notifs' }), 900)
+          else this.set({ notifs: s.notifs.filter((x) => x.key !== key) })
+          break
+        }
+        const reason = String(m.reason || '')
+        if (reason === 'off') this.toast('スマホの「通知へのアクセス」がオフになっています。スマホの設定 →「通知へのアクセス」で Tsunagu を許可してください')
+        else if (reason === 'locked') this.toast('この通知はスマホ側で消せません（進行中・消去不可の通知です）')
+        else if (reason === 'missing') this.set({ notifs: s.notifs.filter((x) => x.key !== key) })
+        else this.toast('通知を消せませんでした')
+        break
+      }
       case 'media': this.set({ media: m.state }); break
       case 'clip': {
         this.lastClip = m.text
@@ -1066,8 +1093,30 @@ class Link {
           this.toast('スマホからテキストが届きました', { label: 'コピー', run: () => navigator.clipboard.writeText(m.text) }))
         break
       }
-      case 'threads': this.set({ threads: m.items }); break
-      case 'sms': this.set({ sms: { ...s.sms, [m.threadId]: m.items } }); break
+      case 'threads': this.set({ threads: m.items || [], threadsError: m.error || undefined }); break
+      case 'sms': {
+        const tid = String(m.threadId || '')
+        if (!tid) break
+        const older = !!m.older
+        const items: Sms[] = Array.isArray(m.items) ? m.items : []
+        const cur = s.sms[tid] || []
+        const had = new Set(cur.map((x) => String(x.id)))
+        const added = items.filter((x) => !had.has(String(x.id))).length
+        // Optimistic entries from sendSms() are replaced by the phone's copy.
+        const base = cur.filter((x) => !(String(x.id).startsWith('tmp') && items.some((y) => y.mine && y.body === x.body)))
+        const map = new Map<string, Sms>()
+        for (const x of [...base, ...items]) if (x && x.id != null) map.set(String(x.id), x)
+        const list = [...map.values()].sort((a, b) => (a.time || 0) - (b.time || 0))
+        this.clearSmsTimer(tid)
+        this.set({
+          sms: { ...s.sms, [tid]: list },
+          // An older page that added nothing means the history ends here.
+          smsMore: { ...s.smsMore, [tid]: !!m.hasMore && !(older && added === 0) },
+          smsBusy: { ...s.smsBusy, [tid]: false },
+          smsError: { ...s.smsError, [tid]: m.error ? this.smsErrorText(String(m.error)) : undefined },
+        })
+        break
+      }
       case 'sms_in': {
         this.notify(m.name || m.address, m.body); this.toast(`メッセージ: ${m.name || m.address}`)
         this.send({ t: 'get', what: 'threads' }); if (m.threadId) this.send({ t: 'get', what: 'sms', threadId: m.threadId })
@@ -1082,8 +1131,11 @@ class Link {
       case 'photos': this.set({ photos: m.offset ? [...s.photos, ...m.items] : m.items, photosMore: m.hasMore }); break
       case 'fs_list': this.set({ fsPath: m.path || '', fsItems: m.items || [], fsAccess: !!m.access, fsReady: true }); break
       case 'location': {
-        if (m.error) this.set({ locError: m.error, locBusy: false })
-        else this.set({ loc: { lat: m.lat, lng: m.lng, acc: m.acc ?? null, time: m.time }, locError: undefined, locBusy: false })
+        const mode = m.mode === 'always' ? 'always' : m.mode === 'while_in_use' ? 'while_in_use' : undefined
+        const fg = m.fg === true
+        clearTimeout(this.locTimer)
+        if (m.error) this.set({ locError: String(m.error), locBusy: false, locMode: mode, locFg: fg })
+        else this.set({ loc: { lat: m.lat, lng: m.lng, acc: m.acc ?? null, time: m.time }, locError: undefined, locBusy: false, locMode: mode, locFg: fg })
         break
       }
       case 'toast': this.toast(m.text); break
@@ -1158,14 +1210,56 @@ class Link {
   }
 
   getPhotos(reset: boolean) { this.send({ t: 'get', what: 'photos', offset: reset ? 0 : this.state.photos.length }) }
+
+  private smsTimers = new Map<string, number>()
+  private clearSmsTimer(tid: string) {
+    const t = this.smsTimers.get(tid)
+    if (t) { clearTimeout(t); this.smsTimers.delete(tid) }
+  }
+  private smsErrorText(e: string) {
+    if (e === 'permission') return 'スマホでメッセージ（SMS）の権限が許可されていません。スマホの Tsunagu アプリの「連携する機能」から許可してください。'
+    return `メッセージを読み込めませんでした（${e}）`
+  }
+
+  /** Asks for one page of a conversation (newest page, or older than `before`).
+   *  Always ends in either the messages or a visible reason: a page that never
+   *  arrives used to leave the conversation silently blank. */
+  private requestSms(threadId: string, before: number) {
+    if (!threadId || threadId === 'new') return
+    if (!this.conn?.open) {
+      this.set({ smsError: { ...this.state.smsError, [threadId]: 'スマホが接続されていません' }, smsBusy: { ...this.state.smsBusy, [threadId]: false } })
+      return
+    }
+    this.set({ smsBusy: { ...this.state.smsBusy, [threadId]: true } })
+    this.send({ t: 'get', what: 'sms', threadId, before })
+    this.clearSmsTimer(threadId)
+    this.smsTimers.set(threadId, window.setTimeout(() => {
+      this.smsTimers.delete(threadId)
+      if (!this.state.smsBusy[threadId]) return
+      this.set({
+        smsBusy: { ...this.state.smsBusy, [threadId]: false },
+        smsError: { ...this.state.smsError, [threadId]: 'スマホから応答がありません。Tsunagu アプリが動いているか確認して、もう一度お試しください。' },
+      })
+    }, 15000))
+  }
+
   openThread(id: string) {
-    this.send({ t: 'get', what: 'sms', threadId: id })
-    // Opening a conversation marks it read on the phone too (the phone updates
-    // the providers' READ flags where Android allows it and pushes the result).
-    this.send({ t: 'mark_read', threadId: id })
+    if (id && id !== 'new') {
+      this.set({ smsError: { ...this.state.smsError, [id]: undefined } })
+      this.requestSms(id, 0)
+      this.send({ t: 'mark_read', threadId: id })
+    }
     // Optimistically clear the badge; the phone's next threads push is authoritative.
     this.set({ threads: this.state.threads.map((t) => (t.id === id ? { ...t, unread: false, unreadCount: 0 } : t)) })
   }
+  /** 「以前のメッセージを読み込む」: the page before the oldest message we hold. */
+  loadOlder(id: string) {
+    const list = this.state.sms[id] || []
+    const oldest = list.length ? list[0].time : 0
+    if (!oldest) return
+    this.requestSms(id, oldest)
+  }
+  retryThread(id: string) { this.set({ smsError: { ...this.state.smsError, [id]: undefined } }); this.requestSms(id, 0) }
   clearWatch() { this.send({ t: 'watch', threadId: '' }) }
 
   // ---------------- Explorer ----------------
@@ -1195,8 +1289,42 @@ class Link {
     }
   }
 
+  // ---------------- Notifications ----------------
+  /** 消去: the phone reports back whether it worked (and why not). */
+  dismissNotif(key: string) {
+    if (!this.conn?.open) { this.toast('スマホが接続されていません'); return }
+    this.send({ t: 'notif_dismiss', key })
+  }
+
+  /** Opens a system permission screen on the phone ("listener" = 通知へのアクセス). */
+  permOpen(which: 'listener') { this.send({ t: 'perm_open', which }); this.toast('スマホで許可の画面を開きました') }
+
   // ---------------- Find （探す） ----------------
-  getLocation() { this.set({ locBusy: true, locError: undefined }); this.send({ t: 'get', what: 'location' }) }
+  private locTimer?: number
+  /** Never leaves the screen stuck on 「取得中…」 when no answer comes back. */
+  private armLocTimer(ms: number) {
+    clearTimeout(this.locTimer)
+    this.locTimer = window.setTimeout(() => this.set({ locBusy: false, locError: this.state.locError || 'unavailable' }), ms)
+  }
+  getLocation() {
+    this.set({ locBusy: true, locError: undefined })
+    this.send({ t: 'get', what: 'location' })
+    this.armLocTimer(20000)
+  }
+  /** Opens the phone's permission screen: "always" = 常に許可, "fix" = 使用中のみ. */
+  locPerm(which: 'always' | 'fix') {
+    this.send({ t: 'loc_perm', which })
+    this.toast('スマホで位置情報の許可画面を開きました。許可すると現在地を取得します')
+    this.set({ locBusy: true })
+    this.armLocTimer(60000)
+  }
+  /** Asks the phone to open its app and take a fix right now (works with 使用中のみ). */
+  locNow() {
+    this.send({ t: 'loc_now' })
+    this.toast('スマホのアプリで位置情報を取得します（スマホの画面を確認してください）')
+    this.set({ locBusy: true, locError: undefined })
+    this.armLocTimer(60000)
+  }
 
   clearTransfers() { this.set({ transfers: this.state.transfers.filter((t) => t.state === 'active') }) }
 }

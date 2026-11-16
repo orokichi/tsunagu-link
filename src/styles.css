@@ -36,7 +36,11 @@ a { color: inherit; text-decoration: none; }
 .rail { width: 96px; flex: none; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 16px 0; overflow-y: auto; transition: width .5s var(--spring-soft); }
 .brand { display: flex; flex-direction: column; align-items: center; gap: 4px; font-weight: 780; font-size: 13px; margin-bottom: 12px; flex: none; }
 .brand img { width: 40px; height: 40px; }
-.fab { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; width: 64px; height: 64px; border-radius: 20px; background: var(--md-primary-container); color: var(--md-on-primary-container); cursor: pointer; margin-bottom: 14px; font-size: 12px; font-weight: 650; transition: border-radius .5s var(--spring), transform .4s var(--spring), width .5s var(--spring-soft); box-shadow: 0 2px 8px #0002; }
+.fab { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; flex: none; width: 64px; min-width: 64px; height: 64px; min-height: 64px; padding: 6px 4px; border-radius: 20px; background: var(--md-primary-container); color: var(--md-on-primary-container); cursor: pointer; margin-bottom: 14px; font-size: 12px; font-weight: 650; line-height: 1.15; white-space: nowrap; overflow: hidden; transition: border-radius .5s var(--spring), transform .4s var(--spring), width .5s var(--spring-soft); box-shadow: 0 2px 8px #0002; }
+/* The rail scrolls when the window is short; without flex:none this row (the only
+   shrinkable one) was squeezed into a thin strip — the squashed 共有 button. */
+.fab .ms { flex: none; }
+.fab > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .fab:hover { border-radius: 32px; transform: scale(1.04); }
 .fab:active { border-radius: 14px; transform: scale(.94); }
 .nav { background: none; border: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 6px 0; width: 100%; cursor: pointer; flex: none; }
@@ -59,7 +63,7 @@ main > * { animation: enter .6s var(--spring-soft); }
   .app.on .brand { flex-direction: row; gap: 10px; font-size: 20px; padding: 0 14px; margin-bottom: 18px; }
   /* Same row geometry as the nav pills: a half-width chip here looked broken
      next to full-width nav rows after the rail became expandable. */
-  .app.on .fab { flex-direction: row; width: 100%; height: 56px; gap: 14px; padding: 0 18px; margin-bottom: 10px; justify-content: flex-start; font-size: 14.5px; font-weight: 650; border-radius: 28px; align-self: stretch; }
+  .app.on .fab { flex: none; flex-direction: row; width: 100%; height: 56px; min-height: 56px; gap: 14px; padding: 0 18px; margin-bottom: 10px; justify-content: flex-start; font-size: 14.5px; font-weight: 650; border-radius: 28px; align-self: stretch; }
   .app.on .fab:hover { border-radius: 32px; }
   .app.on .fab:active { border-radius: 16px; }
   .app.on .nav { flex-direction: row; padding: 0; }
@@ -445,6 +449,11 @@ main > * { animation: enter .6s var(--spring-soft); }
 
 /* ---- explorer & find ---- */
 .warn-card { display: flex; gap: 14px; align-items: center; background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); border-radius: var(--r-l); padding: 16px 20px; }
+.warn-card.thin { align-items: flex-start; padding: 14px 16px; border-radius: var(--r-m); }
+.warn-card .btn { flex: none; }
+.warn-actions { display: flex; flex-direction: column; gap: 8px; flex: none; }
+.loc-mode { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 0 4px; }
+.loc-mode .btn { height: 36px; }
 .warn-card .ms { font-size: 28px; flex: none; }
 .warn-card > div { flex: 1; display: flex; flex-direction: column; gap: 2px; }
 .crumbs { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; padding: 0 4px; }
@@ -498,7 +507,7 @@ main > * { animation: enter .6s var(--spring-soft); }
   .rail { width: 100%; height: 80px; flex-direction: row; padding: 0 4px; overflow-x: auto; overflow-y: hidden; gap: 0; background: var(--md-surface-container); box-shadow: 0 -1px 0 var(--md-outline-variant); }
   .rail .brand, .rail .rail-foot { display: none; }
   .rail .nav { flex: 0 0 auto; width: 76px; }
-  .rail .fab { position: fixed; right: 16px; bottom: 96px; margin: 0; z-index: 10; width: 64px; height: 64px; }
+  .rail .fab { position: fixed; right: 16px; bottom: 96px; margin: 0; z-index: 10; flex: none; width: 64px; min-width: 64px; height: 64px; min-height: 64px; }
   .card { padding: 18px; border-radius: var(--r-l); }
   .hero-device { padding: 22px; border-radius: var(--r-xl); }
   .hero-actions { margin-left: 0; width: 100%; }

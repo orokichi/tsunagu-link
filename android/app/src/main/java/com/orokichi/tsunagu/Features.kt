@@ -47,7 +47,21 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.coroutines.resume
 
+/** One page of a conversation plus the reason it may be empty. */
+data class SmsPage(val items: JSONArray, val hasMore: Boolean, val error: String?)
+
 class Features(private val ctx: Context) {
+    companion object {
+        /** 「使用中のみ」でも「常に」でも、位置情報の許可があるか. */
+        fun locGranted(c: Context): Boolean =
+            c.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            c.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+        /** 「常に許可」(ACCESS_BACKGROUND_LOCATION): アプリを開いていなくても位置を取れる. */
+        fun locAlways(c: Context): Boolean =
+            Build.VERSION.SDK_INT >= 29 && c.checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
+    }
+
     private val cr = ctx.contentResolver
     private fun has(p: String) = ctx.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
 
@@ -110,10 +124,11 @@ class Features(private val ctx: Context) {
     }
 
     // ---------- notifications ----------
-    fun notifications(): JSONArray {
+    fun notifications(): Pair<JSONArray, String?> {
         val arr = JSONArray()
-        NotifListener.instance?.items()?.forEach { arr.put(it) }
-        return arr
+        val l = NotifListener.instance ?: return arr to "off"
+        l.items().forEach { arr.put(it) }
+        return arr to null
     }
 
     // ---------- media ----------
@@ -187,7 +202,9 @@ class Features(private val ctx: Context) {
      *  Carrier MMS almost always carries SMIL + a media part, while RCS chats are
      *  stored in this same provider as text-only entries — that distinction is what
      *  the sms/rcs/mms "kind" labels are based on (no public API separates them). */
+    private val mmsCache = HashMap<Long, Pair<String, Boolean>>()
     private fun mmsInfo(mid: Long): Pair<String, Boolean> {
+        mmsCache[mid]?.let { return it }
         val texts = ArrayList<String>()
         var hasMedia = false
         runCatching {
@@ -204,7 +221,9 @@ class Features(private val ctx: Context) {
             hasMedia -> "（添付ファイル）"
             else -> ""
         }
-        return body to hasMedia
+        // PDU parts never change after delivery, so one lookup per message is enough.
+        if (mmsCache.size > 400) mmsCache.clear()
+        return (body to hasMedia).also { mmsCache[mid] = it }
     }
     private fun mmsKind(hasMedia: Boolean) = if (hasMedia) "mms" else "rcs"
     private fun mmsAddress(mid: Long, outgoing: Boolean): String {
@@ -301,8 +320,15 @@ class Features(private val ctx: Context) {
             o.put("unreadCount", n); o.put("unread", n > 0)
         }
         val arr = JSONArray()
-        byId.values.sortedByDescending { it.getLong("time") }.take(60).forEach { arr.put(it) }
+        byId.values.sortedByDescending { it.optLong("time") }.take(60).forEach { arr.put(it) }
         return arr
+    }
+
+    /** Thread list plus the reason it is empty ("permission" / a query error), so
+     *  the PC can say why instead of showing a blank list. */
+    fun threadsSafe(): Pair<JSONArray, String?> {
+        if (!has(Manifest.permission.READ_SMS)) return JSONArray() to "permission"
+        return runCatching<Pair<JSONArray, String?>> { threads() to null }.getOrElse { JSONArray() to (it.message ?: it.toString()) }
     }
 
     /** Marks every unread SMS/MMS in a thread as read in the providers and
@@ -323,53 +349,101 @@ class Features(private val ctx: Context) {
         }
         return n
     }
-    fun sms(threadId: String): JSONArray {
+    /**
+     * One page of a conversation. [before] is the oldest timestamp the PC already
+     * holds (0 = the newest page), so older history is fetched on demand: a long
+     * conversation then never has to travel as one huge message, and a query that
+     * fails on one provider can no longer wipe out the whole answer.
+     * [error] is non-null when something failed, so the PC can show the reason.
+     */
+    fun smsPage(threadId: String, before: Long, limit: Int): SmsPage {
+        val cap = limit.coerceIn(1, 300)
         // Synthetic thread that exists only in the local sent log.
         if (threadId.startsWith("local:")) {
             val addr = threadId.removePrefix("local:")
+            val all = SentLog.all(ctx).filter { SentLog.sameNumber(it.address, addr) && (before <= 0 || it.time <= before) }
+                .sortedByDescending { it.time }
             val out = JSONArray()
-            SentLog.all(ctx).filter { SentLog.sameNumber(it.address, addr) }.sortedBy { it.time }.takeLast(150).forEach { e ->
+            all.take(cap).sortedBy { it.time }.forEach { e -> runCatching {
                 out.put(JSONObject().put("id", "s${e.time}").put("body", e.body).put("time", e.time).put("mine", true).put("kind", "sms").put("read", true))
-            }
-            return out
+            } }
+            return SmsPage(out, all.size > cap, null)
         }
-        val list = ArrayList<JSONObject>()
-        if (!has(Manifest.permission.READ_SMS)) return JSONArray()
-        runCatching {
-            cr.query(Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms._ID, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE, Telephony.Sms.READ),
-                "${Telephony.Sms.THREAD_ID}=?", arrayOf(threadId), "${Telephony.Sms.DATE} DESC")?.use { c ->
-                while (c.moveToNext() && list.size < 1000) {
-                    list.add(JSONObject().put("id", c.getString(0)).put("body", c.getString(1) ?: "").put("time", c.getLong(2))
-                        .put("mine", c.getInt(3) != Telephony.Sms.MESSAGE_TYPE_INBOX).put("kind", "sms").put("read", c.getInt(4) != 0))
+        if (!has(Manifest.permission.READ_SMS)) return SmsPage(JSONArray(), false, "permission")
+        val rows = ArrayList<JSONObject>()
+        var err: String? = null
+        runCatching { rows.addAll(smsRows(threadId, before, cap + 1)) }
+            .onFailure { err = it.message ?: it.toString() }
+        runCatching { rows.addAll(mmsRows(threadId, before, cap + 1)) }
+            .onFailure { if (err == null) err = it.message ?: it.toString() }
+        // Messages sent from the PC are not always written to the provider, so the
+        // local log is merged into the newest page (deduped by body and time).
+        if (before <= 0) runCatching { mergeSentLog(threadId, rows) }
+        val byId = LinkedHashMap<String, JSONObject>()
+        rows.forEach { o -> o.optString("id").takeIf { it.isNotEmpty() }?.let { id -> byId[id] = o } }
+        val desc = byId.values.toList().sortedByDescending { it.optLong("time") }
+        val page = desc.take(cap).sortedBy { it.optLong("time") }
+        return SmsPage(JSONArray(page), desc.size > cap, err)
+    }
+
+    private fun smsRows(threadId: String, before: Long, cap: Int): List<JSONObject> {
+        val out = ArrayList<JSONObject>()
+        val args = ArrayList<String>().apply { add(threadId) }
+        val sel = StringBuilder("${Telephony.Sms.THREAD_ID}=?")
+        if (before > 0) { sel.append(" AND ${Telephony.Sms.DATE}<=?"); args.add(before.toString()) }
+        val c = cr.query(Telephony.Sms.CONTENT_URI,
+            arrayOf(Telephony.Sms._ID, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE, Telephony.Sms.READ),
+            sel.toString(), args.toTypedArray(), "${Telephony.Sms.DATE} DESC") ?: return out
+        c.use {
+            while (out.size < cap && it.moveToNext()) {
+                val time = if (it.isNull(2)) 0L else it.getLong(2)
+                val id = if (it.isNull(0)) "s$time" else it.getString(0) ?: "s$time"
+                runCatching {
+                    out.add(JSONObject().put("id", id).put("body", if (it.isNull(1)) "" else it.getString(1) ?: "")
+                        .put("time", time)
+                        .put("mine", !it.isNull(3) && it.getInt(3) != Telephony.Sms.MESSAGE_TYPE_INBOX)
+                        .put("kind", "sms").put("read", !it.isNull(4) && it.getInt(4) != 0))
                 }
             }
         }
-        runCatching {
-            cr.query(Telephony.Mms.CONTENT_URI, arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.MESSAGE_BOX, Telephony.Mms.READ),
-                "${Telephony.Mms.THREAD_ID}=?", arrayOf(threadId), "${Telephony.Mms.DATE} DESC")?.use { c ->
-                while (c.moveToNext() && list.size < 2000) {
-                    val mid = c.getLong(0)
+        return out
+    }
+
+    private fun mmsRows(threadId: String, before: Long, cap: Int): List<JSONObject> {
+        val out = ArrayList<JSONObject>()
+        val args = ArrayList<String>().apply { add(threadId) }
+        val sel = StringBuilder("${Telephony.Mms.THREAD_ID}=?")
+        // MMS dates are seconds: the cursor bound needs the same unit (plus one
+        // second of slack, so a page boundary never drops a message).
+        if (before > 0) { sel.append(" AND ${Telephony.Mms.DATE}<=?"); args.add((before / 1000 + 1).toString()) }
+        val c = cr.query(Telephony.Mms.CONTENT_URI,
+            arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE, Telephony.Mms.MESSAGE_BOX, Telephony.Mms.READ),
+            sel.toString(), args.toTypedArray(), "${Telephony.Mms.DATE} DESC") ?: return out
+        c.use {
+            while (out.size < cap && it.moveToNext()) {
+                if (it.isNull(0)) continue
+                val mid = it.getLong(0)
+                runCatching {
                     val (body, media) = mmsInfo(mid)
-                    list.add(JSONObject().put("id", "m$mid").put("body", body).put("time", c.getLong(1) * 1000)
-                        .put("mine", c.getInt(2) != Telephony.Mms.MESSAGE_BOX_INBOX).put("kind", mmsKind(media)).put("read", c.getInt(3) != 0))
+                    out.add(JSONObject().put("id", "m$mid").put("body", body)
+                        .put("time", (if (it.isNull(1)) 0L else it.getLong(1)) * 1000)
+                        .put("mine", !it.isNull(2) && it.getInt(2) != Telephony.Mms.MESSAGE_BOX_INBOX)
+                        .put("kind", mmsKind(media)).put("read", !it.isNull(3) && it.getInt(3) != 0))
                 }
             }
         }
-        // Merge local sent-log entries for this thread's address that the
-        // provider does not have (dedup: same body, outgoing, within 2 minutes
-        // of a provider copy counts as the same message).
-        runCatching {
-            val addr = threadAddress(threadId)
-            if (addr != null) {
-                for (e in SentLog.all(ctx)) {
-                    if (!SentLog.sameNumber(e.address, addr)) continue
-                    val dup = list.any { it.getBoolean("mine") && it.getString("body") == e.body && kotlin.math.abs(it.getLong("time") - e.time) <= 120_000 }
-                    if (!dup) list.add(JSONObject().put("id", "s${e.time}").put("body", e.body).put("time", e.time).put("mine", true).put("kind", "sms").put("read", true))
-                }
-            }
+        return out
+    }
+
+    /** Merges the local sent log for [threadId] into [rows] (same body within two
+     *  minutes of a provider copy counts as the same message). */
+    private fun mergeSentLog(threadId: String, rows: ArrayList<JSONObject>) {
+        val addr = threadAddress(threadId) ?: return
+        for (e in SentLog.all(ctx)) {
+            if (!SentLog.sameNumber(e.address, addr)) continue
+            val dup = rows.any { it.optBoolean("mine") && it.optString("body") == e.body && kotlin.math.abs(it.optLong("time") - e.time) <= 120_000 }
+            if (!dup) rows.add(JSONObject().put("id", "s${e.time}").put("body", e.body).put("time", e.time).put("mine", true).put("kind", "sms").put("read", true))
         }
-        list.sortBy { it.getLong("time") }
-        return JSONArray(list.takeLast(150))
     }
     /** Best-effort address lookup for a provider thread id (SMS first, then MMS). */
     private fun threadAddress(threadId: String): String? {
@@ -475,16 +549,27 @@ class Features(private val ctx: Context) {
     fun photoUri(key: String): Uri? = key.drop(1).toLongOrNull()?.let { itemUri(it, key.startsWith("v")) }
 
     // ---------- location （探す） ----------
-    /** Current position for the PC "探す" screen. Uses a fresh last-known fix
-     *  when available, otherwise requests one current fix (9s timeout) and
-     *  falls back to the stale last-known fix. Errors are explicit:
-     *  "permission" (no location permission) / "unavailable" (no fix). */
+    /**
+     * Current position for the PC "探す" screen.
+     *
+     * Android only lets a background app read the location when it either holds
+     * "常に許可" (ACCESS_BACKGROUND_LOCATION) or runs a location foreground service
+     * ([fgLocation], see LinkService). Errors are explicit so the PC can explain
+     * what to do instead of failing silently:
+     *   permission      → no location permission at all
+     *   foreground_only → 使用中のみ granted; needs the app open or 常に許可
+     *   disabled        → the phone's location switch is off
+     *   unavailable     → allowed, but no fix could be obtained
+     */
     @SuppressLint("MissingPermission")
-    suspend fun location(): JSONObject {
+    suspend fun location(fgLocation: Boolean): JSONObject {
         val fine = has(Manifest.permission.ACCESS_FINE_LOCATION)
         val coarse = has(Manifest.permission.ACCESS_COARSE_LOCATION)
-        if (!fine && !coarse) return JSONObject().put("error", "permission")
+        val always = locAlways(ctx)
+        if (!fine && !coarse) return locErr("permission", always)
         val lm = ctx.getSystemService(LocationManager::class.java)
+        if (!runCatching { lm.isLocationEnabled }.getOrDefault(true)) return locErr("disabled", always)
+        val live = always || fgLocation
         var best: Location? = null
         runCatching {
             for (p in lm.getProviders(true)) {
@@ -494,13 +579,21 @@ class Features(private val ctx: Context) {
             }
         }
         val b = best
-        if (b != null && System.currentTimeMillis() - b.time < 60_000) return locJson(b)
-        val fresh = runCatching { withTimeoutOrNull(9_000) { currentFix(lm, fine) } }.getOrNull()
+        if (b != null && System.currentTimeMillis() - b.time < 90_000) return locJson(b, always, fgLocation)
+        // Only ask for a fresh fix when the system will actually deliver one; from
+        // the background with 使用中のみ it silently returns nothing (or throws).
+        val fresh = if (live) runCatching { withTimeoutOrNull(12_000) { currentFix(lm, fine) } }.getOrNull() else null
         val use = fresh ?: b
-        return if (use != null) locJson(use) else JSONObject().put("error", "unavailable")
+        if (use == null) return locErr(if (live) "unavailable" else "foreground_only", always)
+        return locJson(use, always, fgLocation)
     }
-    private fun locJson(l: Location) = JSONObject().put("lat", l.latitude).put("lng", l.longitude)
+    private fun locErr(reason: String, always: Boolean) = JSONObject().put("error", reason)
+        .put("mode", if (always) "always" else "while_in_use").put("always", always)
+    private fun locJson(l: Location, always: Boolean, fgLocation: Boolean) = JSONObject()
+        .put("lat", l.latitude).put("lng", l.longitude)
         .put("acc", if (l.hasAccuracy()) l.accuracy.toDouble() else JSONObject.NULL).put("time", l.time)
+        .put("mode", if (always) "always" else "while_in_use").put("always", always).put("fg", fgLocation)
+        .put("age", System.currentTimeMillis() - l.time)
     @SuppressLint("MissingPermission")
     private suspend fun currentFix(lm: LocationManager, fine: Boolean): Location? = suspendCancellableCoroutine { cont ->
         val provider = when {
@@ -509,8 +602,11 @@ class Features(private val ctx: Context) {
             else -> null
         }
         if (provider == null) { cont.resume(null); return@suspendCancellableCoroutine }
+        val ctl = android.os.CancellationSignal()
+        // A timed-out request must not keep the GPS warm: cancel it on timeout.
+        cont.invokeOnCancellation { runCatching { ctl.cancel() } }
         runCatching {
-            lm.getCurrentLocation(provider, null, ctx.mainExecutor) { loc -> if (cont.isActive) cont.resume(loc) }
+            lm.getCurrentLocation(provider, ctl, ctx.mainExecutor) { loc -> if (cont.isActive) cont.resume(loc) }
         }.onFailure { if (cont.isActive) cont.resume(null) }
     }
 

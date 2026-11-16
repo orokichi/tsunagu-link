@@ -67,6 +67,11 @@ class LinkService : Service() {
         private val _pcRinging = MutableStateFlow(false)
         val pcRinging: StateFlow<Boolean> = _pcRinging
         @Volatile var lastClip: String = ""
+        /** True while MainActivity is in front: Android 14+ only lets an app start a
+         *  location foreground service with 使用中のみ permission from the foreground. */
+        @Volatile var appVisible: Boolean = false
+        /** Messages per page; older pages are fetched as the PC scrolls back. */
+        const val SMS_PAGE = 60
 
         fun start(c: Context) {
             c.startForegroundService(Intent(c, LinkService::class.java))
@@ -155,8 +160,8 @@ class LinkService : Service() {
             // The conversation the PC is looking at counts as read: keep the
             // providers' READ flags in step so its unread badge clears too.
             watchedThread?.let { runCatching { features.markRead(it) } }
-            send(msg("threads", "items" to features.threads()))
-            watchedThread?.let { send(msg("sms", "threadId" to it, "items" to features.sms(it))) }
+            sendThreads()
+            watchedThread?.let { sendSmsPage(it) }
         }
     }
 
@@ -169,7 +174,7 @@ class LinkService : Service() {
         super.onCreate()
         instance = this
         features = Features(this)
-        startForeground(1, fgNotif("接続を準備中…"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        startFg()
         createWeb()
         getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(net)
         registerReceiver(battery, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -346,16 +351,91 @@ class LinkService : Service() {
     }
 
     private fun refreshFg() {
-        val text = if (_status.value == "connected") {
-            val route = when (activeVia) {
-                "lan" -> "（同じネットワークで直接接続）"
-                "usb" -> "（USB ケーブルで接続）"
-                "cloud" -> "（クラウド経由）"
-                else -> ""
+        getSystemService(NotificationManager::class.java).notify(1, fgNotif(fgText()))
+    }
+
+    private fun fgText(): String = if (_status.value == "connected") {
+        val route = when (activeVia) {
+            "lan" -> "（同じネットワークで直接接続）"
+            "usb" -> "（USB ケーブルで接続）"
+            "cloud" -> "（クラウド経由）"
+            else -> ""
+        }
+        "${Prefs.pcName(this)} と接続中$route"
+    } else "PC を探しています…"
+
+    // ---------------- 位置情報のフォアグラウンドサービス ----------------
+    @Volatile private var fgLocation = false
+
+    /** Foreground service types for this run. A location service needs the location
+     *  permission, and with only 使用中のみ it may not be started from the background,
+     *  so the type is added only when that is allowed (see promoteLocation). */
+    private fun fgTypes(): Int {
+        val base = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        if (!Features.locGranted(this)) return base
+        if (!Features.locAlways(this) && !appVisible) return base
+        return base or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+    }
+
+    private fun startFg() {
+        val t = fgTypes()
+        try {
+            startForeground(1, fgNotif(fgText()), t)
+            fgLocation = (t and ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION) != 0
+        } catch (e: Exception) {
+            // Not allowed right now (missing permission, or started from the
+            // background): keep the link itself alive as specialUse.
+            fgLocation = false
+            runCatching { startForeground(1, fgNotif(fgText()), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) }
+        }
+    }
+
+    /**
+     * Called when the app comes to the front (or a location permission was just
+     * granted). Upgrades the running service to a location foreground service so
+     * 「探す」 keeps working while the app is in the background with only 使用中のみ
+     * granted — the plain link service counts as background for the location APIs.
+     */
+    fun promoteLocation() {
+        main.post {
+            if (_status.value == "idle" || fgLocation) return@post
+            if (!Features.locGranted(this)) return@post
+            val t = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            runCatching {
+                startForeground(1, fgNotif(fgText()), t)
+                fgLocation = true
             }
-            "${Prefs.pcName(this)} と接続中$route"
-        } else "PC を探しています…"
-        getSystemService(NotificationManager::class.java).notify(1, fgNotif(text))
+        }
+    }
+
+    /** Answers 「探す」 (also used right after a permission was granted). */
+    fun sendLocation() {
+        scope.launch {
+            val o = withContext(Dispatchers.IO) {
+                runCatching { features.location(fgLocation) }.getOrElse { msg("location", "error" to "unavailable") }
+            }
+            val out = msg("location")
+            o.keys().forEach { k -> out.put(k, o.get(k)) }
+            send(out)
+        }
+    }
+
+    /** Brings the app to the front from the background (to grant a permission or
+     *  take a fix with 使用中のみ). Only apps that may draw over other apps can start
+     *  activities freely, so a tappable notification is the fallback. */
+    private fun launchApp(loc: String, text: String) {
+        val i = Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            .putExtra(MainActivity.EXTRA_LOC, loc)
+        if (android.provider.Settings.canDrawOverlays(this) && runCatching { startActivity(i); true }.getOrDefault(false)) {
+            toast("スマホのアプリで位置情報を確認しています")
+            return
+        }
+        val pi = PendingIntent.getActivity(this, 91, i, PendingIntent.FLAG_IMMUTABLE)
+        getSystemService(NotificationManager::class.java).notify(91, Notification.Builder(this, App.CH_EVENT)
+            .setSmallIcon(R.drawable.ic_stat).setContentTitle("Tsunagu").setContentText(text)
+            .setContentIntent(pi).setAutoCancel(true).build())
+        toast("スマホの通知をタップしてください（$text）")
     }
 
     private fun js(code: String, cb: ((String) -> Unit)? = null) {
@@ -413,7 +493,7 @@ class LinkService : Service() {
                 activeVia = via; _via.value = via
                 js("B.setActive(${JSONObject.quote(via)})")
                 withContext(Dispatchers.Main) { setStatus("connected"); refreshFg() }
-                sendInfo(); send(msg("notifs", "items" to features.notifications()))
+                sendInfo(); sendNotifs()
                 infoJob?.cancel()
                 infoJob = scope.launch { while (isActive) { delay(60_000); sendInfo() } }
             }
@@ -438,22 +518,21 @@ class LinkService : Service() {
             }
             "get" -> when (m.optString("what")) {
                 "info" -> sendInfo()
-                "notifs" -> send(msg("notifs", "items" to features.notifications()))
+                "notifs" -> sendNotifs()
                 "media" -> send(msg("media", "state" to features.mediaState()))
-                "threads" -> send(msg("threads", "items" to features.threads()))
-                "sms" -> m.optString("threadId").let { watchedThread = it; send(msg("sms", "threadId" to it, "items" to features.sms(it))) }
+                "threads" -> sendThreads()
+                "sms" -> {
+                    val tid = m.optString("threadId")
+                    watchedThread = tid
+                    sendSmsPage(tid, m.optLong("before", 0))
+                }
                 "calls" -> send(msg("calls", "items" to features.calls()))
                 "photos" -> {
                     val off = m.optInt("offset", 0)
                     val (items, more) = features.photos(off, 48)
                     send(msg("photos", "items" to items, "offset" to off, "hasMore" to more))
                 }
-                "location" -> {
-                    val loc = features.location()
-                    val o = msg("location")
-                    loc.keys().forEach { k -> o.put(k, loc.get(k)) }
-                    send(o)
-                }
+                "location" -> sendLocation()
                 "fs" -> sendFsList(m.optString("path"))
                 "sys" -> sendSys()
             }
@@ -486,8 +565,8 @@ class LinkService : Service() {
                 val tid = m.optString("threadId")
                 if (tid.isNotEmpty()) {
                     runCatching { features.markRead(tid) }
-                    send(msg("threads", "items" to features.threads()))
-                    send(msg("sms", "threadId" to tid, "items" to features.sms(tid)))
+                    sendThreads()
+                    sendSmsPage(tid)
                 }
             }
             "watch" -> watchedThread = m.optString("threadId").ifEmpty { null }
@@ -529,7 +608,40 @@ class LinkService : Service() {
                 up.done += bytes.size
             }
             "fs_put_end" -> finishFsUpload(m.optString("id"))
-            "notif_dismiss" -> NotifListener.instance?.dismiss(m.optString("key"))
+            // ---- 探す: the PC cannot grant permissions, only open the app ----
+            "loc_perm" -> launchApp(if (m.optString("which") == "always") "always" else "fix",
+                if (m.optString("which") == "always") "位置情報を「常に許可」にする" else "位置情報を許可する")
+            "loc_now" -> launchApp("fix", "位置を取得しています")
+            // 通知へのアクセス (notification listener) can only be switched on by hand.
+            "perm_open" -> when (m.optString("which")) {
+                "listener" -> {
+                    val i = Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    if (runCatching { startActivity(i); true }.getOrDefault(false)) toast("スマホで Tsunagu の「通知へのアクセス」をオンにしてください")
+                    else toast("スマホの「設定」→「通知」→「通知へのアクセス」でオンにしてください")
+                }
+                else -> launchApp("fix", "位置情報を許可する")
+            }
+            "notif_dismiss" -> {
+                val key = m.optString("key")
+                val l = NotifListener.instance
+                if (l == null || !NotifListener.enabled(this)) {
+                    send(msg("notif_dismiss_result", "key" to key, "ok" to false, "reason" to "off"))
+                } else {
+                    val (ok, reason) = l.dismiss(key)
+                    if (!ok) send(msg("notif_dismiss_result", "key" to key, "ok" to false, "reason" to reason))
+                    else if (key == "*") send(msg("notif_dismiss_result", "key" to key, "ok" to true, "reason" to ""))
+                    else {
+                        scope.launch {
+                            // Verify: a notification the OS will not let go of (ongoing /
+                            // no-clear) is still there a moment after the cancel.
+                            delay(600)
+                            val left = runCatching { l.isActive(key) }.getOrDefault(false)
+                            send(msg("notif_dismiss_result", "key" to key, "ok" to !left,
+                                "reason" to if (left) "locked" else ""))
+                        }
+                    }
+                }
+            }
             "notif_reply" -> NotifListener.instance?.reply(m.optString("key"), m.optString("text"))?.let { ok -> toast(if (ok) "返信しました" else "返信できませんでした") }
             "notif_action" -> NotifListener.instance?.action(m.optString("key"), m.optInt("index"))
             "media_cmd" -> features.mediaCommand(m.optString("cmd"))
@@ -538,8 +650,8 @@ class LinkService : Service() {
                 toast(if (ok) "SMS を送信しました" else "SMS を送信できませんでした（権限を確認してください）")
                 m.optString("threadId").takeIf { it.isNotEmpty() && it != "new" }?.let { watchedThread = it }
                 delay(1500)
-                send(msg("threads", "items" to features.threads()))
-                m.optString("threadId").takeIf { it.isNotEmpty() && it != "new" }?.let { send(msg("sms", "threadId" to it, "items" to features.sms(it))) }
+                sendThreads()
+                m.optString("threadId").takeIf { it.isNotEmpty() && it != "new" }?.let { sendSmsPage(it) }
             }
             "dial" -> toast(if (features.dial(m.optString("number"))) "スマホから発信しています" else "発信できませんでした（電話の権限を確認してください）")
             "call_end" -> features.endCall()
@@ -563,6 +675,27 @@ class LinkService : Service() {
     }
 
     fun toast(text: String) = send(msg("toast", "text" to text))
+
+    // ---------------- Notifications / messages to the PC ----------------
+    private suspend fun sendNotifs() {
+        val (items, err) = features.notifications()
+        send(msg("notifs", "items" to items, "error" to err))
+    }
+
+    private suspend fun sendThreads() {
+        val (items, err) = runCatching<Pair<JSONArray, String?>> { withContext(Dispatchers.IO) { features.threadsSafe() } }
+            .getOrElse { JSONArray() to (it.message ?: "error") }
+        send(msg("threads", "items" to items, "error" to err))
+    }
+
+    /** Sends one page of a conversation. Always answers — even when the provider
+     *  query fails — so the PC never waits for a reply that never comes. */
+    private suspend fun sendSmsPage(threadId: String, before: Long = 0) {
+        val page = runCatching { withContext(Dispatchers.IO) { features.smsPage(threadId, before, SMS_PAGE) } }
+            .getOrElse { SmsPage(JSONArray(), false, it.message ?: "error") }
+        send(msg("sms", "threadId" to threadId, "items" to page.items, "hasMore" to page.hasMore,
+            "older" to (before > 0), "error" to page.error))
+    }
 
     // ---------------- Phone → PC actions (the PC screen in the app) ----------------
     fun pcOpenUrl(url: String) {

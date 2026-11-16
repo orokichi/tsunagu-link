@@ -322,7 +322,7 @@ function NotifRow({ n, compact, autoReply }: { n: import('./link').Notif; compac
         {reply !== null && <form className="reply" onSubmit={(e) => { e.preventDefault(); link.send({ t: 'notif_reply', key: n.key, text: reply }); setReply(null) }}>
           <input autoFocus value={reply} onChange={(e) => setReply(e.target.value)} placeholder="返信を入力" /><button className="icon-btn filled"><Icon n="send" /></button></form>}
       </div>
-      <button className="icon-btn" aria-label="消去" onClick={() => link.send({ t: 'notif_dismiss', key: n.key })}><Icon n="close" /></button>
+      <button className="icon-btn" aria-label="消去" onClick={() => link.dismissNotif(n.key)}><Icon n="close" /></button>
     </div>
   )
 }
@@ -333,7 +333,7 @@ function NotifDetail({ n }: { n: import('./link').Notif }) {
       <div className="detail-head">
         <div className="avatar xl">{n.icon ? <img src={'data:image/png;base64,' + n.icon} alt="" /> : <Icon n="notifications" />}</div>
         <div><div className="overline">{n.app}</div><div className="muted small">{new Date(n.time).toLocaleString('ja-JP')}</div></div>
-        <button className="icon-btn" title="消去" onClick={() => link.send({ t: 'notif_dismiss', key: n.key })}><Icon n="delete" /></button>
+        <button className="icon-btn" title="消去" onClick={() => link.dismissNotif(n.key)}><Icon n="delete" /></button>
       </div>
       <h2 className="display-s">{n.title}</h2>
       <p className="detail-body">{n.text}</p>
@@ -361,7 +361,13 @@ function Notifs() {
         {s.pushState === 'error' && <button className="btn tonal" onClick={() => link.enablePush()}><Icon n="refresh" />Push設定を再試行</button>}
         {s.pushState === 'on' && <span className="muted small">閉じていても通知: 有効{s.pushSynced ? '（スマホに登録済み）' : '（スマホ接続時に登録します）'}</span>}
         {s.pushState === 'on' && <button className="btn tonal" onClick={() => link.disablePush()}>Pushを無効化</button>}
-        <button className="btn tonal" onClick={() => link.send({ t: 'notif_dismiss', key: '*' })}><Icon n="clear_all" />すべて消去</button></header>
+        <button className="btn tonal" onClick={() => link.dismissNotif('*')}><Icon n="clear_all" />すべて消去</button></header>
+      {s.notifsError === 'off' && <div className="warn-card">
+        <Icon n="notifications_off" />
+        <div><b>スマホの「通知へのアクセス」がオフになっています</b>
+          <p className="small">スマホの「設定」→「通知」→「通知へのアクセス」で Tsunagu をオンにすると、通知の表示・返信・消去ができるようになります。</p></div>
+        <button className="btn filled" onClick={() => link.permOpen('listener')}>スマホで許可</button>
+      </div>}
       {wide ? (
         <div className="two-pane">
           <div className="card list-card pane-list">
@@ -388,6 +394,9 @@ function Messages() {
   const [to, setTo] = useState('')
   const th = s.threads.find((t) => t.id === sel)
   const msgs = sel ? s.sms[sel] || [] : []
+  const err = sel && sel !== 'new' ? s.smsError[sel] : undefined
+  const busy = sel && sel !== 'new' ? s.smsBusy[sel] : false
+  const more = sel && sel !== 'new' ? s.smsMore[sel] : false
   const end = useRef<HTMLDivElement>(null)
   useEffect(() => { end.current?.scrollIntoView({ block: 'end' }) }, [msgs.length, sel])
   // Leaving the messages screen stops the phone from treating the open
@@ -402,6 +411,13 @@ function Messages() {
     <div className={'pane split' + (sel ? ' has-sel' : '')}>
       <div className="card threads">
         <header className="pane-h"><h2 className="display-s">メッセージ</h2><button className="icon-btn filled" title="新規" onClick={() => setSel('new')}><Icon n="edit_square" /></button></header>
+        {s.threadsError && <div className="warn-card thin">
+          <Icon n="error" />
+          <div><b>{s.threadsError === 'permission' ? 'メッセージへのアクセスが許可されていません' : 'メッセージを読み込めませんでした'}</b>
+            <p className="small">{s.threadsError === 'permission'
+              ? 'スマホの Tsunagu アプリの「連携する機能」→「メッセージ (SMS)」から許可してください。'
+              : s.threadsError}</p></div>
+        </div>}
         {s.threads.map((t) => (
           <button key={t.id} className={'thread ' + (sel === t.id ? 'sel' : '') + ((t.unreadCount || 0) > 0 ? ' unread' : '')} onClick={() => { setSel(t.id); link.openThread(t.id) }}>
             <div className="avatar letter">{(t.name || t.address).slice(0, 1)}</div>
@@ -414,7 +430,17 @@ function Messages() {
         {sel ? <>
           <header className="convo-h"><button className="icon-btn back" title="戻る" onClick={() => { setSel(null); link.clearWatch() }}><Icon n="arrow_back" /></button>{sel === 'new' ? <input className="to" placeholder="宛先の電話番号" value={to} onChange={(e) => setTo(e.target.value)} /> : <><b>{th?.name || th?.address}</b><span className="muted small">{th?.address}</span>{th?.kind && <span className="kind-label">{th.kind === 'rcs' ? 'RCSメッセージ' : th.kind === 'mms' ? 'MMSメッセージ' : 'メッセージ'}</span>}</>}
             {th && <button className="icon-btn" title="発信" onClick={() => link.send({ t: 'dial', number: th.address })}><Icon n="call" /></button>}</header>
-          <div className="bubbles">{msgs.map((m) => <div key={m.id} className={'bubble ' + (m.mine ? 'mine' : '')}>{m.body}<span>{fmtTime(m.time)}</span></div>)}<div ref={end} /></div>
+          <div className="bubbles">
+            {more && <div className="center"><button className="btn text" disabled={busy} onClick={() => sel && link.loadOlder(sel)}><Icon n="history" />{busy ? '読み込み中…' : '以前のメッセージを読み込む'}</button></div>}
+            {err && <div className="warn-card thin">
+              <Icon n="error" />
+              <div><b>メッセージを読み込めませんでした</b><p className="small">{err}</p></div>
+              <button className="btn tonal" onClick={() => sel && link.retryThread(sel)}>再試行</button>
+            </div>}
+            {msgs.map((m) => <div key={m.id} className={'bubble ' + (m.mine ? 'mine' : '')}>{m.body}<span>{fmtTime(m.time)}</span></div>)}
+            {!msgs.length && !err && <Empty icon="forum" text={busy ? '読み込み中…' : 'メッセージはありません'} />}
+            <div ref={end} />
+          </div>
           <form className="composer" onSubmit={send}><input placeholder={th?.kind === 'rcs' || th?.kind === 'mms' ? 'メッセージを入力（SMS として送信されます）' : 'メッセージを入力'} value={text} onChange={(e) => setText(e.target.value)} /><button className="icon-btn filled big"><Icon n="send" fill /></button></form>
         </> : <Empty icon="forum" text="会話を選択してください" />}
       </div>
@@ -606,8 +632,38 @@ function Find() {
         <button className="btn tonal" disabled={s.locBusy} onClick={() => link.getLocation()}><Icon n="my_location" />{s.locBusy ? '取得中…' : '位置を再取得'}</button>
         <RingButton className="btn tonal" />
       </header>
-      {s.locError === 'permission' && <div className="warn-card"><Icon n="location_off" /><div><b>位置情報が許可されていません</b><p className="small">スマホの Tsunagu アプリで「位置情報」を許可してください（アプリのホーム画面の「連携する機能」から許可できます）。</p></div></div>}
-      {s.locError === 'unavailable' && <div className="warn-card"><Icon n="location_off" /><div><b>位置を取得できませんでした</b><p className="small">スマホの位置情報がオフになっているか、電波の届かない場所にいる可能性があります。スマホの設定で位置情報をオンにして、もう一度お試しください。</p></div></div>}
+      {s.locMode && <div className="loc-mode small muted">
+        <Icon n={s.locMode === 'always' ? 'location_on' : 'my_location'} />
+        位置情報の許可: {s.locMode === 'always' ? '常に許可' : '使用中のみ'}
+        {s.locMode !== 'always' && <button className="btn text" onClick={() => link.locPerm('always')}>常に許可にする</button>}
+      </div>}
+      {s.locError === 'permission' && <div className="warn-card">
+        <Icon n="location_off" />
+        <div><b>位置情報が許可されていません</b>
+          <p className="small">スマホの Tsunagu アプリで「位置情報」を許可してください。下のボタンでスマホの許可画面を開けます（アプリのホーム画面の「連携する機能」からも許可できます）。</p></div>
+        <button className="btn filled" onClick={() => link.locPerm('fix')}>スマホで許可</button>
+      </div>}
+      {s.locError === 'foreground_only' && <div className="warn-card">
+        <Icon n="location_searching" />
+        <div><b>「常に許可」になっていないため、アプリを開いていないと現在地を取れません</b>
+          <p className="small">スマホの設定で位置情報を「常に許可」にすると、スマホをポケットに入れたままでも PC の地図に現在地が出ます。「今すぐ取得」はスマホのアプリを開いて位置を取ります。</p></div>
+        <div className="warn-actions">
+          <button className="btn filled" onClick={() => link.locPerm('always')}>常に許可にする</button>
+          <button className="btn tonal" onClick={() => link.locNow()}>今すぐ取得</button>
+        </div>
+      </div>}
+      {s.locError === 'disabled' && <div className="warn-card">
+        <Icon n="location_disabled" />
+        <div><b>スマホの位置情報がオフになっています</b>
+          <p className="small">スマホの「設定」→「位置情報」をオンにしてから、もう一度お試しください。</p></div>
+        <button className="btn tonal" onClick={() => link.locNow()}>スマホのアプリを開く</button>
+      </div>}
+      {s.locError === 'unavailable' && <div className="warn-card">
+        <Icon n="location_off" />
+        <div><b>位置を取得できませんでした</b>
+          <p className="small">電波の届かない場所にいるか、位置情報がオフになっている可能性があります。少し待って「位置を再取得」を押すか、スマホのアプリを開いて取得してください。</p></div>
+        <button className="btn tonal" onClick={() => link.locNow()}>スマホのアプリを開く</button>
+      </div>}
       {loc ? <div className="find-layout">
         <iframe title="OpenStreetMap" className="map-frame" src={embed} loading="lazy" />
         <div className="card find-meta">

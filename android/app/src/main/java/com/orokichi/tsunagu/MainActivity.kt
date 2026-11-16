@@ -63,11 +63,78 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        /** "fix" = get a position now / "always" = allow location all the time. */
+        const val EXTRA_LOC = "loc"
+    }
+
+    /** What the user asked for before the permission dialog opened. */
+    private var locAsk: String? = null
+
+    /** 位置情報 step 1: 使用中のみ (fine/coarse). */
+    private val locPerm = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { r ->
+        val ok = r[Manifest.permission.ACCESS_FINE_LOCATION] == true || r[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        val want = locAsk
+        locAsk = null
+        if (!ok) { android.widget.Toast.makeText(this, "位置情報が許可されませんでした", android.widget.Toast.LENGTH_SHORT).show(); return@registerForActivityResult }
+        // The app is visible now: the running link service may take the location
+        // service type, which keeps 「探す」 working in the background.
+        LinkService.instance?.promoteLocation()
+        if (want == "always" && !Features.locAlways(this)) askBackground() else LinkService.instance?.sendLocation()
+    }
+
+    /** 位置情報 step 2: 常に許可。Android 11+ では設定画面へ案内するダイアログになる。 */
+    private val bgPerm = registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
+        LinkService.instance?.sendLocation()
+    }
+
+    private fun askLoc(want: String) {
+        locAsk = want
+        if (Features.locGranted(this)) {
+            locAsk = null
+            LinkService.instance?.promoteLocation()
+            if (want == "always" && !Features.locAlways(this)) askBackground() else LinkService.instance?.sendLocation()
+        } else {
+            locPerm.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+        }
+    }
+
+    private fun askBackground() {
+        android.widget.Toast.makeText(this, "次の画面で「位置情報」→「常に許可」を選んでください", android.widget.Toast.LENGTH_LONG).show()
+        runCatching { bgPerm.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION) }
+    }
+
+    /** Opened from the PC's 「探す」 screen (`EXTRA_LOC`). */
+    private fun handleLoc(i: Intent?) {
+        when (i?.getStringExtra(EXTRA_LOC)) {
+            "fix" -> askLoc("fix")
+            "always" -> askLoc("always")
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleLoc(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         if (Prefs.paired(this)) LinkService.start(this)
         setContent { TsunaguTheme { Root() } }
+        handleLoc(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        LinkService.appVisible = true
+        LinkService.instance?.promoteLocation()
+    }
+
+    override fun onPause() {
+        LinkService.appVisible = false
+        super.onPause()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -179,6 +246,7 @@ val PERMS = listOf(
     Perm(Icons.Rounded.PhotoLibrary, "写真と動画", "最近の写真・動画を PC で閲覧・保存", listOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO), special = "media"),
     Perm(Icons.Rounded.Folder, "エクスプローラー（全ファイル）", "スマホ内のファイルを PC から閲覧・送受信・削除・名前変更", special = "allfiles"),
     Perm(Icons.Rounded.MyLocation, "位置情報", "「探す」でスマホの現在地を PC の地図（OpenStreetMap）に表示", listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)),
+    Perm(Icons.Rounded.LocationSearching, "位置情報（常に許可）", "アプリを開いていないときも「探す」で現在地を取得します", special = "location_always"),
     Perm(Icons.Rounded.NotificationsActive, "アプリの通知", "受信ファイル・リンク・鳴らす機能の通知", listOf(Manifest.permission.POST_NOTIFICATIONS)),
     Perm(Icons.Rounded.BatterySaver, "バックグラウンドで常時接続", "電池の最適化を除外して接続を維持", special = "battery"),
     Perm(Icons.Rounded.OpenInNew, "リンクを直接開く", "PC から送ったリンクを即座に開く（他のアプリの上に表示）", special = "overlay"),
@@ -193,6 +261,7 @@ fun granted(ctx: Context, p: Perm): Boolean = when (p.special) {
     "allfiles" -> android.os.Environment.isExternalStorageManager()
     "write_settings" -> SysControls.canWrite(ctx)
     "dnd" -> SysControls.dndAccess(ctx)
+    "location_always" -> Features.locAlways(ctx)
     // Partial ("selected photos") access counts: the chosen photos/videos are usable.
     "media" -> (ctx.checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED &&
         ctx.checkSelfPermission(Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED) ||
@@ -473,6 +542,10 @@ fun grant(ctx: Context, p: Perm, request: (Array<String>) -> Unit) {
         }
         "write_settings" -> runCatching { ctx.startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:${ctx.packageName}"))) }
         "dnd" -> runCatching { ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)) }
+        // 常に許可 has no runtime dialog on Android 11+: the app asks in the
+        // foreground and, when needed, sends the user to the location settings.
+        "location_always" -> ctx.startActivity(Intent(ctx, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP).putExtra(MainActivity.EXTRA_LOC, "always"))
         // Re-requesting lets the user widen a partial ("selected photos") grant or allow all.
         "media" -> request(p.perms.toTypedArray())
         else -> request(p.perms.toTypedArray())
