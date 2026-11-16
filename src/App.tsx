@@ -3,6 +3,7 @@ import { link, Photo, Transfer, APP_VERSION } from './link'
 import { applyTheme } from './theme'
 import { Icon, QuickShareIcon } from './icons'
 import Desktop from './desktop'
+import Assistant, { GroqSettings } from './Assistant'
 export { Icon, QuickShareIcon }
 
 const APK_URL = 'https://github.com/orokichi/tsunagu-link/releases/latest'
@@ -836,6 +837,8 @@ function Settings() {
         <UsbPanel settings />
       </section>
 
+      <GroqSettings />
+
       <section className="card set-card a-exp">
         <div className="set-head">
           <div><h3>実験的な機能</h3><p className="muted small">試せる新機能です。不具合があっても元に戻せます</p></div>
@@ -964,6 +967,7 @@ export default function App() {
           {/^https?:\/\/\S+$/.test(s.inbox.text.trim()) && <a className="btn tonal" href={s.inbox.text.trim()} target="_blank" rel="noreferrer" onClick={() => link.clearInbox()}><Icon n="open_in_new" />開く</a>}
           <button className="btn filled" onClick={() => { const t = s.inbox!.text; navigator.clipboard.writeText(t).then(() => link.toast('コピーしました')).catch(() => {}); link.clearInbox() }}><Icon n="content_copy" />コピー</button></div></div></div>}
       {drag && <div className="drop-overlay"><div className="qs-core lg"><QuickShareIcon size={54} /></div><b>ドロップして{s.device ? `${s.device.name} に送信` : 'スマホに送信'}</b></div>}
+      <Assistant onOpenSettings={() => setView('settings')} />
       <ShareSheet />
       <div className="toasts">{s.toasts.map((t) => <div key={t.id} className="toast">{t.text}{t.action && <button onClick={t.action.run}>{t.action.label}</button>}</div>)}</div>
     </div>

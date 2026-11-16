@@ -1510,6 +1510,22 @@ class Link {
 
   clearTransfers() { this.set({ transfers: this.state.transfers.filter((t) => t.state === 'active') }) }
 
+  /** Ask the phone for fresh data and resolve once the matching state changed
+   *  (or after `ms`). The AI assistant reads through this so its answers
+   *  describe the phone as it is right now, not as it was at connect time. */
+  async requestState(what: 'info' | 'notifs' | 'threads' | 'sys' | 'calls' | 'photos' | 'location', ms = 5000): Promise<boolean> {
+    if (!this.conn?.open) return false
+    const key = what as keyof State
+    const before = JSON.stringify(this.state[key] ?? null)
+    this.send({ t: 'get', what })
+    const t0 = Date.now()
+    while (Date.now() - t0 < ms) {
+      await new Promise((r) => setTimeout(r, 120))
+      if (JSON.stringify(this.state[key] ?? null) !== before) return true
+    }
+    return false
+  }
+
   // ---------------- Experimental 「Googlebook OS」 desktop UI ----------------
   setBookUi(on: boolean) {
     ls.set('bookui', on ? '1' : '0')
