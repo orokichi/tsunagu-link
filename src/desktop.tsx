@@ -1,22 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { link, APP_VERSION } from './link'
 import type { Media, Notif, Photo, State } from './link'
-import { Icon, QuickShareIcon } from './icons'
+import { Icon, QuickShareIcon, GroqIcon } from './icons'
+import { M3Widget, PRESETS, planWidget, useWidgets, widgetStore, TEMPLATES, type Widget } from './widgets'
+import { QuickAIOrb } from './Assistant'
 
 /**
- * Experimental 「Googlebook OS」 desktop (設定 → 実験的な機能).
+ * 「Googlebook OS」 desktop — the standard screen (設定 → 画面 でクラシック表示へ).
  *
  * Modelled on Google's Android-based desktop OS shown in September/October 2026
  * (9to5Google hands-on and review, Notebookcheck, press renders of the Lenovo
  * Googlebook 15): a ChromeOS-shaped desktop that feels like a Pixel —
  *  · top status bar: clock / weekday / date on the left (tap → calendar), the
- *    Android status icons (Wi-Fi, battery, notification bell) and a media pill on
- *    the right, where a tap opens Pixel-style Quick Settings and the shade;
+ *    Android status icons and a media pill on the right, where a tap opens
+ *    Pixel-style Quick Settings and the shade;
+ *  · a widget board down the left side that is ALWAYS there — the phone's state,
+ *    the AI-made widgets, Quick Share and the running media — while app windows
+ *    open on the right half, so a window never hides what is behind it;
  *  · centred floating dock with the stylised G (action key) and the app icons;
- *  · a home screen of Dynamic-Color Pixel widgets and shortcuts;
- *  · real floating windows (drag, resize, minimise, maximise, phone-width) so
- *    notifications, messages, photos, sharing, files and settings run side by
- *    side like apps on a desktop.
+ *  · real floating windows (drag, resize, minimise, maximise, phone-width).
  * Everything is drawn with the app's own Material 3 dynamic color roles, so the
  * phone's wallpaper seed still colours the whole desktop.
  */
@@ -27,8 +29,12 @@ type Win = {
   prev?: { x: number; y: number; w: number; h: number }
 }
 
+/** `groq` draws the Quick AI mark (the Groq「g」in Material style) instead of a
+ *  Material Symbols ligature. */
 export const DESKTOP_APPS: [string, string, string][] = [
   ['home', 'ホーム', 'home'],
+  ['quickai', 'クイックAI', 'groq'],
+  ['remote', 'スマホ操作', 'mouse'],
   ['notifs', '通知', 'notifications'],
   ['messages', 'メッセージ', 'chat'],
   ['calls', '通話', 'call'],
@@ -41,8 +47,16 @@ export const DESKTOP_APPS: [string, string, string][] = [
 ]
 
 const WEEK = ['日曜日', '月曜日', '火曜日', '水曜日', '木曜日', '金曜日', '土曜日']
-const APP_NAME = (v: string) => (DESKTOP_APPS.find((a) => a[0] === v) || [v, v, 'apps'])[1]
-const APP_ICON = (v: string) => (DESKTOP_APPS.find((a) => a[0] === v) || [v, v, 'apps'])[2]
+const META = (v: string) => DESKTOP_APPS.find((a) => a[0] === v) || ([v, v, 'apps'] as [string, string, string])
+const APP_NAME = (v: string) => META(v)[1]
+const APP_ICON = (v: string) => META(v)[2]
+
+/** The app's own mark at the size the slot around it expects. */
+function AppIcon({ view, size }: { view: string; size: number }) {
+  if (view === 'files') return <QuickShareIcon size={size} />
+  if (view === 'quickai') return <GroqIcon size={size} />
+  return <Icon n={APP_ICON(view)} />
+}
 
 function useClock() {
   const [now, setNow] = useState(() => new Date())
@@ -92,9 +106,9 @@ function QuickPanel({ s, onClose }: { s: State; onClose: () => void }) {
   return (
     <div className="gb-panel" onClick={(e) => e.stopPropagation()}>
       <div className="gb-panel-head">
-        <div className="gb-panel-clock"><b>{new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</b><span className="muted small">{new Date().toLocaleDateString('ja-JP', { month: 'long', day: 'numeric' }) }（{WEEK[new Date().getDay()]}）</span></div>
+        <div className="gb-panel-clock"><b>{new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</b><span className="muted small">{new Date().toLocaleDateString('ja-JP', { month: 'long', day: 'numeric' })}（{WEEK[new Date().getDay()]}）</span></div>
         <div className="gb-panel-actions">
-          <button className="icon-btn" title="設定" onClick={() => { link.setBookUi(false) }}><Icon n="open_in_full" /></button>
+          <button className="icon-btn" title="クラシック表示に切り替える" onClick={() => { link.setBookUi(false) }}><Icon n="open_in_full" /></button>
           <button className="icon-btn" title="閉じる" onClick={onClose}><Icon n="close" /></button>
         </div>
       </div>
@@ -120,7 +134,7 @@ function QuickPanel({ s, onClose }: { s: State; onClose: () => void }) {
         <button className="gb-tile" onClick={() => link.pushClipboard(true)}><span className="gb-tile-icon"><Icon n="content_paste_go" /></span><span><b>クリップボード</b><span className="small">スマホへ送る</span></span></button>
         <button className="gb-tile" onClick={() => link.send({ t: 'ring', on: true })}><span className="gb-tile-icon"><Icon n="ring_volume" /></span><span><b>スマホを鳴らす</b><span className="small">音で知らせる</span></span></button>
         <button className="gb-tile" onClick={() => link.getLocation()}><span className="gb-tile-icon"><Icon n="location_on" /></span><span><b>探す</b><span className="small">現在地を取得</span></span></button>
-        <button className="gb-tile" onClick={() => link.setBookUi(false)}><span className="gb-tile-icon"><Icon n="desktop_windows" /></span><span><b>標準の画面</b><span className="small">実験的UIをオフ</span></span></button>
+        <button className="gb-tile" onClick={() => link.setBookUi(false)}><span className="gb-tile-icon"><Icon n="view_sidebar" /></span><span><b>クラシック表示</b><span className="small">レール型の画面へ</span></span></button>
       </div>
 
       <div className="gb-shade-h">
@@ -139,7 +153,7 @@ function QuickPanel({ s, onClose }: { s: State; onClose: () => void }) {
         ))}
         {!s.notifs.length && <div className="empty"><Icon n="notifications_off" /><span>通知はありません</span></div>}
       </div>
-      <div className="gb-panel-foot small muted">Quick Link Web v{APP_VERSION} · Googlebook OS 風デスクトップ（実験的）</div>
+      <div className="gb-panel-foot small muted">Quick Link Web v{APP_VERSION} · Googlebook OS デスクトップ</div>
     </div>
   )
 }
@@ -158,7 +172,7 @@ function Drawer({ onPick, onClose }: { onPick: (v: string) => void; onClose: () 
         <div className="gb-drawer-grid">
           {apps.map(([k, label]) => (
             <button key={k} className="gb-app" onClick={() => onPick(k)}>
-              <span className="gb-app-icon">{k === 'files' ? <QuickShareIcon size={26} /> : <Icon n={APP_ICON(k)} />}</span>
+              <span className={'gb-app-icon' + (k === 'quickai' ? ' groq' : '')}><AppIcon view={k} size={26} /></span>
               <span className="small">{label}</span>
             </button>
           ))}
@@ -168,6 +182,63 @@ function Drawer({ onPick, onClose }: { onPick: (v: string) => void; onClose: () 
   )
 }
 
+/* ---------------- Widget creation (AI or preset) ---------------- */
+function WidgetCreator({ s, onClose }: { s: State; onClose: () => void }) {
+  const [prompt, setPrompt] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const add = (w: Widget) => { widgetStore.add(w); setMsg({ ok: true, text: `「${w.title}」を追加しました` }) }
+
+  const create = async () => {
+    const q = prompt.trim()
+    if (!q || busy) return
+    setBusy(true); setMsg(null)
+    const r = await planWidget(q)
+    if (r.widget) add(r.widget)
+    if (!r.ok) setMsg({ ok: false, text: r.error })
+    else if (r.widget) setPrompt('')
+    setBusy(false)
+  }
+
+  const IDEAS = ['バッテリーと通知が見やすい大きめウィジェット', '位置情報と接続状態のコンパクトなやつ', '未読メッセージの数を大きく', '通知を4件並べたフィード']
+
+  return (
+    <section className="gbw-new" role="dialog" aria-label="ウィジェットを作成">
+      <header>
+        <Icon n="auto_awesome" />
+        <b>ウィジェットを作成</b>
+        <button className="icon-btn sm" aria-label="閉じる" onClick={onClose}><Icon n="close" /></button>
+      </header>
+      <p className="small muted">欲しいものを言葉で書くと、クイックAI が Material 3 の型・大きさ・色・表示項目を選んでデスクトップに置きます。HTML は作りません。</p>
+      <form className="gbw-new-form" onSubmit={(e) => { e.preventDefault(); void create() }}>
+        <input value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="例: バッテリーと通知が見やすい大きめウィジェット" aria-label="ウィジェットの希望" />
+        <button className="btn filled" disabled={busy || !prompt.trim()}>
+          <Icon n={busy ? 'progress_activity' : 'auto_awesome'} className={busy ? 'spin' : ''} />{busy ? '考えています…' : 'AI に作ってもらう'}
+        </button>
+      </form>
+      <div className="gbw-ideas">
+        {IDEAS.map((t) => <button key={t} className="qai-chip" disabled={busy} onClick={() => setPrompt(t)}>{t}</button>)}
+      </div>
+      {msg && <p className={'small ' + (msg.ok ? 'ai-ok' : 'ai-ng')}>{msg.text}</p>}
+
+      <div className="gbw-new-sec">
+        <b className="small">プリセットから選ぶ</b>
+        <div className="gbw-presets">
+          {PRESETS.map((p) => (
+            <button key={p.id} className="gbw-preset" onClick={() => add({ ...p, id: 'w' + Math.random().toString(36).slice(2, 9), created: Date.now() })}>
+              <span className={'gbw-preset-ic z-' + p.theme}><Icon n={p.icon} /></span>
+              <span><b>{p.title}</b><span className="small muted">{p.template} · {p.size}</span></span>
+            </button>
+          ))}
+        </div>
+        <p className="small muted">{TEMPLATES.map((t) => `${t.label}=${t.grid}`).join(' / ')}</p>
+      </div>
+      <p className="small muted">{s.status === 'connected' ? '追加したウィジェットはスマートフォンの状態に合わせて自動で更新されます。' : 'スマートフォンに接続すると、追加したウィジェットに実際の値が入ります。'}</p>
+    </section>
+  )
+}
+
+/* ---------------- The desktop ---------------- */
 export default function Desktop({ s, view, setView, renderView, badges }: {
   s: State; view: string; setView: (v: string) => void
   renderView: (v: string) => React.ReactNode; badges: Record<string, number>
@@ -178,8 +249,15 @@ export default function Desktop({ s, view, setView, renderView, badges }: {
   const [panel, setPanel] = useState(false)
   const [cal, setCal] = useState(false)
   const [drawer, setDrawer] = useState(false)
+  const [creator, setCreator] = useState(false)
+  const [widgetMenu, setWidgetMenu] = useState<string | null>(null)
+  const widgets = useWidgets()
   const vw = typeof window !== 'undefined' ? window.innerWidth : 1400
   const vh = typeof window !== 'undefined' ? window.innerHeight : 900
+  // The widget board owns the left of the screen; windows open to its right, so
+  // opening an app never hides the widgets behind it.
+  const railW = vw >= 980 ? Math.min(380, Math.max(292, vw * 0.26)) : 0
+  const minX = vw >= 980 ? railW + 18 : 12
 
   const focusWin = useCallback((id: string) => {
     const nz = ++zRef.current
@@ -195,14 +273,19 @@ export default function Desktop({ s, view, setView, renderView, badges }: {
     setWins((ws) => {
       const hit = ws.find((w) => w.view === v)
       if (hit) return ws.map((w) => (w.view === v ? { ...w, min: false, z: nz } : w))
+      // A window sized for the free area beside the widget board, staggered a
+      // little each time so two windows can sit side by side.
       const count = ws.filter((w) => !w.min).length
-      const w = Math.min(980, Math.max(520, vw * 0.52))
-      const h = Math.min(vh - 140, Math.max(420, vh * 0.66))
-      const x = Math.max(12, Math.min(vw - w - 12, 120 + (count % 5) * 48))
-      const y = Math.max(60, Math.min(vh - h - 90, 90 + (count % 5) * 36))
+      const narrow = v === 'quickai'
+      let w = narrow ? Math.min(472, vw - minX - 24) : Math.min(920, Math.max(520, (vw - minX) * 0.72))
+      let h = Math.min(vh - 150, Math.max(420, vh * 0.64))
+      const x = Math.max(minX, vw - w - 22)
+      if (x + w > vw - 12) w = Math.max(340, vw - 12 - x)
+      let y = 58 + (count % 4) * 30
+      if (y + h > vh - 104) h = Math.max(320, vh - 104 - y)
       return [...ws, { id: 'w' + nz, view: v, x, y, w, h, z: nz, min: false, max: false, phone: false }]
     })
-  }, [vw, vh])
+  }, [vw, vh, minX])
   /** Dock / drawer / shortcut: keep the app's view in step and open the window. */
   const pick = useCallback((v: string) => { setView(v); open(v) }, [open, setView])
 
@@ -212,20 +295,20 @@ export default function Desktop({ s, view, setView, renderView, badges }: {
 
   const close = (id: string) => setWins((ws) => ws.filter((w) => w.id !== id))
   const minimize = (id: string) => setWins((ws) => ws.map((w) => (w.id === id ? { ...w, min: true } : w)))
-  const togglePhone = (id: string) => setWins((ws) => ws.map((w) => (w.id === id ? { ...w, phone: !w.phone, w: !w.phone ? 400 : Math.min(980, vw * 0.52), h: !w.phone ? Math.min(vh - 140, 820) : Math.min(vh - 140, Math.max(420, vh * 0.66)) } : w)))
+  const togglePhone = (id: string) => setWins((ws) => ws.map((w) => (w.id === id ? { ...w, phone: !w.phone, w: !w.phone ? 400 : Math.min(920, (vw - minX) * 0.72), h: !w.phone ? Math.min(vh - 140, 820) : Math.min(vh - 150, Math.max(420, vh * 0.64)) } : w)))
   const toggleMax = (id: string) => setWins((ws) => ws.map((w) => {
     if (w.id !== id) return w
     if (w.max) return { ...w, max: false, ...(w.prev || {}) }
-    return { ...w, max: true, prev: { x: w.x, y: w.y, w: w.w, h: w.h }, x: 0, y: 44, w: vw, h: vh - 44 }
+    return { ...w, max: true, prev: { x: w.x, y: w.y, w: w.w, h: w.h }, x: minX, y: 44, w: vw - minX - 8, h: vh - 44 - 88 }
   }))
 
   const drag = useRef<{ id: string; dx: number; dy: number } | null>(null)
   const resize = useRef<{ id: string; sx: number; sy: number; w: number; h: number } | null>(null)
-
   const visible = wins.filter((w) => !w.min)
+  const quickAiOpen = visible.some((w) => w.view === 'quickai')
 
   return (
-    <div className={'gb' + (panel || cal ? ' gb-dim' : '')} onClick={() => { setPanel(false); setCal(false) }}>
+    <div className={'gb' + (panel || cal ? ' gb-dim' : '')} onClick={() => { setPanel(false); setCal(false); setWidgetMenu(null) }}>
       {/* ---- wallpaper ---- */}
       <div className="gb-wall" aria-hidden="true"><i className="b1" /><i className="b2" /><i className="b3" /><i className="b4" /></div>
 
@@ -258,9 +341,15 @@ export default function Desktop({ s, view, setView, renderView, badges }: {
       {panel && <QuickPanel s={s} onClose={() => setPanel(false)} />}
       {drawer && <Drawer onPick={pick} onClose={() => setDrawer(false)} />}
 
+      {/* ---- widget board: always visible, never covered by a window ---- */}
+      <WidgetBoard s={s} railW={railW} widgets={widgets} menu={widgetMenu}
+        setMenu={setWidgetMenu} onCreate={() => setCreator(true)} onOpen={pick} />
+
+      {creator && <WidgetCreator s={s} onClose={() => setCreator(false)} />}
+
       {/* ---- windows ---- */}
       {visible.map((w) => (
-        <div key={w.id} className={'gb-win' + (w.max ? ' max' : '') + (w.phone ? ' phone' : '')}
+        <div key={w.id} className={'gb-win' + (w.max ? ' max' : '') + (w.phone ? ' phone' : '') + (w.view === 'quickai' ? ' qai-win' : '')}
           style={{ left: w.x, top: w.y, width: w.w, height: w.h, zIndex: w.z }}
           onPointerDown={() => focusWin(w.id)}>
           <div className="gb-win-bar"
@@ -277,7 +366,7 @@ export default function Desktop({ s, view, setView, renderView, badges }: {
               setWins((ws) => ws.map((x) => (x.id === w.id ? { ...x, x: Math.max(-40, Math.min(vw - 80, e.clientX - d.dx)), y: Math.max(44, Math.min(vh - 60, e.clientY - d.dy)) } : x)))
             }}
             onPointerUp={() => { drag.current = null }}>
-            <span className="gb-win-icon">{w.view === 'files' ? <QuickShareIcon size={18} /> : <Icon n={APP_ICON(w.view)} />}</span>
+            <span className={'gb-win-icon' + (w.view === 'quickai' ? ' groq' : '')}><AppIcon view={w.view} size={18} /></span>
             <b>{APP_NAME(w.view)}</b>
             <div className="gb-win-btns">
               <button className="icon-btn sm" title="最小化" onClick={() => minimize(w.id)}><Icon n="remove" /></button>
@@ -300,8 +389,8 @@ export default function Desktop({ s, view, setView, renderView, badges }: {
         </div>
       ))}
 
-      {/* ---- home screen: widgets + shortcuts ---- */}
-      {!visible.length && <HomeSurface s={s} onOpen={pick} />}
+      {/* ---- the orb opens クイックAI as a window (never a full-screen sheet) ---- */}
+      <QuickAIOrb open={quickAiOpen} onClick={() => pick('quickai')} />
 
       {/* ---- dock ---- */}
       <div className="gb-dock" onClick={(e) => e.stopPropagation()}>
@@ -311,7 +400,7 @@ export default function Desktop({ s, view, setView, renderView, badges }: {
           const running = wins.some((w) => w.view === k)
           return (
             <button key={k} className={'gb-dock-app' + (running ? ' run' : '')} title={label} onClick={() => pick(k)}>
-              <span className="gb-app-icon">{k === 'files' ? <QuickShareIcon size={24} /> : <Icon n={APP_ICON(k)} />}</span>
+              <span className={'gb-app-icon' + (k === 'quickai' ? ' groq' : '')}><AppIcon view={k} size={24} /></span>
               {badges[k] ? <em className="gb-badge">{badges[k] > 99 ? '99+' : badges[k]}</em> : null}
               <i className="gb-dot" />
             </button>
@@ -321,60 +410,77 @@ export default function Desktop({ s, view, setView, renderView, badges }: {
         <button className="gb-dock-app" title="ホーム" onClick={() => pick('home')}>
           <span className="gb-app-icon"><Icon n="home" /></span><i className="gb-dot" />
         </button>
-        <button className="gb-dock-app" title="標準の画面に戻す" onClick={() => link.setBookUi(false)}>
-          <span className="gb-app-icon"><Icon n="switch_left" /></span><i className="gb-dot" />
+        <button className="gb-dock-app" title="クラシック表示に切り替える" onClick={() => link.setBookUi(false)}>
+          <span className="gb-app-icon"><Icon n="view_sidebar" /></span><i className="gb-dot" />
         </button>
       </div>
     </div>
   )
 }
 
-/* ---------------- Home screen widgets ---------------- */
-function HomeSurface({ s, onOpen }: { s: State; onOpen: (v: string) => void }) {
+/* ---------------- Widget board ---------------- */
+function WidgetBoard({ s, railW, widgets, menu, setMenu, onCreate, onOpen }: {
+  s: State; railW: number; widgets: Widget[]; menu: string | null
+  setMenu: (v: string | null) => void; onCreate: () => void; onOpen: (v: string) => void
+}) {
   const i = s.info
   const m: Media | null | undefined = s.media
   const pics: Photo[] = s.photos.slice(0, 6)
+  const list = widgets
   return (
-    <div className="gb-home" onClick={(e) => e.stopPropagation()}>
-      <div className="gb-widgets">
-        <section className="gb-w gb-w-phone">
-          <header><Icon n="smartphone" /><span className="muted small">スマートフォン</span></header>
-          <b className="gb-w-title">{s.device?.name || '未接続'}</b>
-          <div className="small muted">{s.device?.model}{s.device?.android ? ` · Android ${s.device.android}` : ''}</div>
-          <div className="gb-w-batt">
-            <Icon n={batIcon(i?.battery ?? null, !!i?.charging)} fill />
-            <b>{i ? `${i.battery}%` : '—'}</b>
-            <span className="small muted">{i?.charging ? '充電中' : i?.net || ''}{i?.powerSave ? ' · セーバー' : ''}</span>
-          </div>
-          <div className="gb-w-chips">
-            <span className="via-chip"><Icon n={s.via === 'lan' ? 'wifi' : s.via === 'usb' ? 'usb' : 'cloud'} />{s.via === 'lan' ? '同じ Wi-Fi' : s.via === 'usb' ? 'USB ケーブル' : s.via ? 'クラウド' : '未接続'}</span>
-            {s.latency != null && <span className="via-chip"><Icon n="bolt" />{s.latency} ms</span>}
-          </div>
-          <div className="gb-w-actions">
-            <button className="gb-btn" onClick={() => link.send({ t: 'ring', on: true })}><Icon n="ring_volume" />鳴らす</button>
-            <button className="gb-btn" onClick={() => onOpen('settings')}><Icon n="settings" />接続</button>
-          </div>
-        </section>
+    <div className="gb-board" style={{ width: railW || '100%' }} onClick={(e) => e.stopPropagation()} onContextMenu={(e) => e.preventDefault()}>
+      <div className="gb-board-h">
+        <span className="gb-board-title"><Icon n="widgets" /><b>ウィジェット</b></span>
+        <button className="icon-btn sm" title="ウィジェットを作成" onClick={onCreate}><Icon n="add" /></button>
+      </div>
+      <div className="gb-board-scroll">
+        <div className="gb-wgrid">
+          <section className="gbw t-status-card z-primary sz-large gbw-phone">
+            <header><span className="gbw-ic"><Icon n="smartphone" /></span><span className="gbw-title">{s.device?.name || 'スマートフォン'}</span></header>
+            <div className="gbw-status">
+              <b>{i ? `${i.battery}%` : '未接続'}</b>
+              <span className="small">{i ? `${i.charging ? '充電中' : '使用中'}${i.powerSave ? ' · 節電中' : ''}` : s.device?.model || 'ペアリングを待っています'}</span>
+              <span className="gbw-pill"><Icon n={s.via === 'lan' ? 'wifi' : s.via === 'usb' ? 'usb' : 'cloud'} />{s.via === 'lan' ? '同じ Wi-Fi' : s.via === 'usb' ? 'USB' : s.via ? 'クラウド' : '未接続'}{s.latency != null ? ` · ${s.latency}ms` : ''}</span>
+            </div>
+            <div className="gbw-actions">
+              <button className="gb-btn" onClick={() => link.send({ t: 'ring', on: true })}><Icon n="ring_volume" />鳴らす</button>
+              <button className="gb-btn" onClick={() => onOpen('settings')}><Icon n="settings" />接続</button>
+            </div>
+          </section>
+
+          {list.map((w) => (
+            <div key={w.id} className={'gbw-wrap sz-' + w.size + (menu === w.id ? ' open' : '')}>
+              <M3Widget w={w} s={s} onMenu={() => setMenu(menu === w.id ? null : w.id)} />
+              {menu === w.id && (
+                <div className="gbw-menu-list">
+                  <button onClick={() => { widgetStore.remove(w.id); setMenu(null) }}><Icon n="delete" />削除</button>
+                  <button disabled={!w.prompt} onClick={async () => {
+                    const p = w.prompt
+                    setMenu(null)
+                    if (!p) return
+                    const r = await planWidget(p)
+                    if (r.widget) widgetStore.replace(w.id, { ...r.widget, id: w.id })
+                  }}><Icon n="refresh" />作り直す</button>
+                  <div className="gbw-menu-info small muted">{w.template} · {w.size} · {w.theme} · {w.sources.join(' / ')}{w.ai ? ' · AI' : ''}</div>
+                </div>
+              )}
+            </div>
+          ))}
+
+          <button className="gbw gbw-add" onClick={onCreate}>
+            <Icon n="add" />
+            <span>ウィジェットを作成</span>
+            <span className="small">AI か プリセットから</span>
+          </button>
+        </div>
 
         <section className="gb-w gb-w-share">
           <header><QuickShareIcon size={18} /><span className="muted small">Quick Share</span></header>
-          <b className="gb-w-title">ファイルもテキストも送る</b>
-          <p className="small muted">この PC のファイルを選ぶか、下の欄に入力して「スマートフォンに送信」を押します。</p>
+          <p className="small muted">ファイルを選ぶか、共有画面から送ります。</p>
           <label className="gb-share-btn"><QuickShareIcon size={20} />ファイルを選ぶ
             <input type="file" multiple hidden onChange={(e) => { if (e.target.files?.length) link.sendFiles(e.target.files); e.target.value = '' }} />
           </label>
           <button className="gb-btn" onClick={() => onOpen('files')}><Icon n="open_in_new" />共有画面を開く</button>
-        </section>
-
-        <section className="gb-w gb-w-notif">
-          <header><Icon n="notifications" /><span className="muted small">通知</span><button className="btn text small" onClick={() => onOpen('notifs')}>すべて</button></header>
-          {s.notifs.slice(0, 3).map((n) => (
-            <div key={n.key} className="gb-w-notif-row">
-              <div className="avatar sm">{n.icon ? <img src={'data:image/png;base64,' + n.icon} alt="" /> : <Icon n="notifications" />}</div>
-              <div><b>{n.title}</b><p className="muted small">{n.text}</p></div>
-            </div>
-          ))}
-          {!s.notifs.length && <div className="empty small"><Icon n="notifications_off" /><span>通知はありません</span></div>}
         </section>
 
         {m && (
@@ -410,15 +516,6 @@ function HomeSurface({ s, onOpen }: { s: State; onOpen: (v: string) => void }) {
             <div className="gb-w-strip">{pics.map((p) => <button key={p.id} onClick={() => onOpen('photos')}><img src={'data:image/jpeg;base64,' + p.thumb} alt={p.name} /></button>)}</div>
           </section>
         )}
-      </div>
-
-      <div className="gb-shortcuts">
-        {DESKTOP_APPS.filter(([k]) => k !== 'home').map(([k, label]) => (
-          <button key={k} className="gb-shortcut" onClick={() => onOpen(k)}>
-            <span className="gb-app-icon lg">{k === 'files' ? <QuickShareIcon size={30} /> : <Icon n={APP_ICON(k)} />}</span>
-            <span className="small">{label}</span>
-          </button>
-        ))}
       </div>
     </div>
   )

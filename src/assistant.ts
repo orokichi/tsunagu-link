@@ -12,6 +12,7 @@
  */
 import { link } from './link'
 import type { State, Sms } from './link'
+import { planWidget, widgetStore } from './widgets'
 
 const API = 'https://api.groq.com/openai/v1'
 const KEY_STORE = 'ts.groq.key'
@@ -70,13 +71,14 @@ export async function testGroq(key: string): Promise<{ ok: boolean; message: str
   }
 }
 
-const SYSTEM = `あなたは「Quick Link」のアシスタントです。Quick Link は、この PC のブラウザと持ち主の Android スマートフォンを WebRTC でつないで、通知・メッセージ・通話・写真・ファイル・クリップボード・位置情報を PC から扱えるようにするアプリです。
+const SYSTEM = `あなたは「クイックAI」です。Quick Link は、この PC のブラウザと持ち主の Android スマートフォンを WebRTC でつないで、通知・メッセージ・通話・写真・ファイル・クリップボード・位置情報を PC から扱えるようにするアプリです。
 あなたは会話しながら、用意されたツールでそのスマートフォンを実際に操作・確認できます。
 
 守ること:
 - スマートフォンの状態（バッテリー、通知、音量、位置など）を答えるときは、必ずツールで最新の状態を取得してから答える。推測で数字を作らない。
 - 操作を頼まれたら、確認を求められていなくても実行してよい（例: 「音量を下げて」「通知を消して」）。ただし SMS の送信は、宛先と本文が指示に含まれている場合だけ実行し、あいまいなら短く聞き返す。
 - ツールが失敗したとき・スマートフォンに接続していないときは、その事実を短く伝え、必要な操作（ペアリングや接続の確認）を1つだけ案内する。
+- ウィジェットを作って頼まれたら create_widget を呼び、どんな見た目で追加したかを1文で伝える。ウィジェットは HTML ではなく、決まった Material 3 の型から選ばれる。
 - 返事は日本語で、声に出して自然な短い文（1〜3文）にする。箇条書きは必要なときだけ。絵文字は使わない。
 - 個人情報（電話番号や本文）は、本人が求めた範囲でだけ扱う。`
 
@@ -91,6 +93,7 @@ function contextNote(s: State): string {
   ]
   if (i) parts.push(`バッテリー ${i.battery}%${i.charging ? '（充電中）' : ''}、回線 ${i.net}`)
   parts.push(`未読メッセージ ${s.threads.reduce((a, t) => a + (t.unreadCount || 0), 0)} 件、通知 ${s.notifs.length} 件`)
+  parts.push(s.remote.acc ? '画面操作（ユーザー補助）: 利用できます' : '画面操作（ユーザー補助）: オフ')
   return parts.join(' / ')
 }
 
@@ -212,6 +215,22 @@ export const TOOLS = [
       parameters: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'phone_global_action',
+      description: 'スマートフォンの画面操作（ユーザー補助経由）。戻る・ホーム・履歴・通知パネル・クイック設定・画面ロック。相手のアプリを開くだけの操作で、文字入力やアプリ内のタップはしない。',
+      parameters: { type: 'object', properties: { action: { type: 'string', enum: ['back', 'home', 'recents', 'notifications', 'quick_settings', 'lock', 'screen_on'] } }, required: ['action'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_widget',
+      description: 'デスクトップに置くウィジェットを、ユーザーの自然な言葉（例:「バッテリーと通知が見やすい大きめウィジェット」）から作って追加する。',
+      parameters: { type: 'object', properties: { request: { type: 'string', description: 'ユーザーが望んだ内容をそのまま' } }, required: ['request'] },
+    },
+  },
 ] as const
 
 /* ---------------- Tool execution ---------------- */
@@ -234,7 +253,9 @@ export async function runTool(name: string, rawArgs: string): Promise<ToolOutcom
   let args: any = {}
   try { args = rawArgs ? JSON.parse(rawArgs) : {} } catch { args = {} }
   const s = link.get()
-  if (s.status !== 'connected') return { ok: false, text: noPhone }
+  // Making a widget only edits this browser's desktop: it works with the phone
+  // disconnected too (the values then show as 「—」 until it comes back).
+  if (s.status !== 'connected' && name !== 'create_widget') return { ok: false, text: noPhone }
   try {
     switch (name) {
       case 'get_phone_status': {
@@ -356,6 +377,25 @@ export async function runTool(name: string, rawArgs: string): Promise<ToolOutcom
         link.send({ t: 'open_url', url })
         return { ok: true, text: `スマートフォンで ${url} を開きました。` }
       }
+      case 'phone_global_action': {
+        const a = String(args.action || '')
+        const map: Record<string, string> = { back: 'back', home: 'home', recents: 'recents', notifications: 'notifications', quick_settings: 'quick_settings', lock: 'lock', screen_on: 'screen_on' }
+        if (!map[a]) return { ok: false, text: 'action は back / home / recents / notifications / quick_settings / lock / screen_on のどれかです。' }
+        if (!link.get().remote.acc) return { ok: false, text: 'スマホの「ユーザー補助（リモート操作）」がオンになっていないため、画面操作はできません。スマホのアプリで許可してください。' }
+        link.remoteKey(map[a])
+        return { ok: true, text: `スマートフォンで ${a} を実行しました。` }
+      }
+      case 'create_widget': {
+        const req = String(args.request || '').trim()
+        if (!req) return { ok: false, text: '作りたいウィジェットの内容が必要です。' }
+        const r = await planWidget(req)
+        if (r.widget) widgetStore.add(r.widget)
+        if (r.ok && r.widget) return { ok: true, text: `「${r.widget.title}」(${r.widget.template} / ${r.widget.size} / ${r.widget.theme} / ${r.widget.sources.join('・')}) をデスクトップに追加しました。` }
+        const why = r.ok ? 'ウィジェットを作れませんでした' : r.error
+        return r.widget
+          ? { ok: false, text: `${why}。代わりに「${r.widget.title}」を追加しました。` }
+          : { ok: false, text: why }
+      }
       default:
         return { ok: false, text: `未知のツールです: ${name}` }
     }
@@ -471,4 +511,6 @@ export const TOOL_LABEL: Record<string, string> = {
   get_phone_location: '現在地を取得',
   ring_phone: 'スマホを鳴らす',
   open_on_phone: 'スマホで開く',
+  phone_global_action: 'スマホの画面操作',
+  create_widget: 'ウィジェットを作成',
 }

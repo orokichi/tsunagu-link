@@ -3,7 +3,8 @@ import { link, Photo, Transfer, APP_VERSION } from './link'
 import { applyTheme } from './theme'
 import { Icon, QuickShareIcon } from './icons'
 import Desktop from './desktop'
-import Assistant, { GroqSettings } from './Assistant'
+import QuickAI, { QuickAIChat, GroqSettings } from './Assistant'
+import Remote from './Remote'
 export { Icon, QuickShareIcon }
 
 const APK_URL = 'https://github.com/orokichi/tsunagu-link/releases/latest'
@@ -841,17 +842,17 @@ function Settings() {
 
       <section className="card set-card a-exp">
         <div className="set-head">
-          <div><h3>実験的な機能</h3><p className="muted small">試せる新機能です。不具合があっても元に戻せます</p></div>
+          <div><h3>画面</h3><p className="muted small">デスクトップとクラシック表示を切り替えます</p></div>
         </div>
         <button className={'set-toggle' + (s.bookUi ? ' on' : '')} role="switch" aria-checked={!!s.bookUi} onClick={() => link.setBookUi(!s.bookUi)}>
           <span className="st-icon"><Icon n="desktop_windows" fill={!!s.bookUi} /></span>
           <span className="st-text">
-            <b>Googlebook OS デスクトップUI（実験的）</b>
-            <span className="small muted">Android ベースの新しいデスクトップ OS「Googlebook OS」を模した画面に切り替えます。上部のステータスバー、中央のフローティングドック、Pixel 風ウィジェットのあるホーム、各機能をフローティングウィンドウで並べて使えます。オン／オフはいつでも切り替えられ、次に開いたときも覚えています。</span>
+            <b>Googlebook OS デスクトップ（標準）</b>
+            <span className="small muted">Android ベースの新しいデスクトップ OS「Googlebook OS」を模した画面です。上部のステータスバー、左側に常に見えているウィジェットボード、中央のフローティングドック、右側に開くアプリウィンドウ。ウィンドウはウィジェットを覆い隠さない位置と大きさで開きます。オフにすると従来のレール型（クラシック表示）になります。</span>
           </span>
           <span className="st-switch" aria-hidden="true"><i /></span>
         </button>
-        <p className="muted small">オンの間も、通知・メッセージ・写真・Quick Share・ファイル・設定などすべての機能をそのまま使えます。この設定はこの PC だけに保存されます。</p>
+        <p className="muted small">どちらの表示でも、通知・メッセージ・写真・Quick Share・ファイル・クイックAI・スマホ操作・設定をそのまま使えます。この設定はこの PC だけに保存されます。</p>
       </section>
 
       <section className="card set-card">
@@ -870,7 +871,8 @@ function Settings() {
 
 /* ---------- Shell ---------- */
 const NAV = [
-  ['home', 'ホーム', 'home'], ['notifs', '通知', 'notifications'], ['messages', 'メッセージ', 'chat'],
+  ['home', 'ホーム', 'home'], ['quickai', 'クイックAI', 'auto_awesome'], ['remote', 'スマホ操作', 'mouse'],
+  ['notifs', '通知', 'notifications'], ['messages', 'メッセージ', 'chat'],
   ['calls', '通話', 'call'], ['photos', '写真', 'photo_library'], ['files', '共有', 'share'],
   ['explorer', 'エクスプローラー', 'folder_open'], ['find', '探す', 'location_on'], ['clip', 'クリップボード', 'content_paste'],
   ['settings', '設定', 'settings'],
@@ -935,6 +937,8 @@ export default function App() {
     messages: s.threads.reduce((a, t) => a + (t.unreadCount || 0), 0),
   } as Record<string, number>), [s.notifs.length, s.threads])
   const renderView = (v: string) =>
+    v === 'quickai' ? <QuickAIChat onOpenSettings={() => setView('settings')} /> :
+    v === 'remote' ? (!connected ? <Pairing /> : <Remote />) :
     !connected && v !== 'settings' ? <Pairing /> :
     v === 'home' ? <Home go={setView} /> : v === 'notifs' ? <Notifs /> : v === 'messages' ? <Messages /> :
     v === 'calls' ? <Calls /> : v === 'photos' ? <Photos /> : v === 'files' ? <Files /> :
@@ -967,7 +971,7 @@ export default function App() {
           {/^https?:\/\/\S+$/.test(s.inbox.text.trim()) && <a className="btn tonal" href={s.inbox.text.trim()} target="_blank" rel="noreferrer" onClick={() => link.clearInbox()}><Icon n="open_in_new" />開く</a>}
           <button className="btn filled" onClick={() => { const t = s.inbox!.text; navigator.clipboard.writeText(t).then(() => link.toast('コピーしました')).catch(() => {}); link.clearInbox() }}><Icon n="content_copy" />コピー</button></div></div></div>}
       {drag && <div className="drop-overlay"><div className="qs-core lg"><QuickShareIcon size={54} /></div><b>ドロップして{s.device ? `${s.device.name} に送信` : 'スマホに送信'}</b></div>}
-      <Assistant onOpenSettings={() => setView('settings')} />
+      <QuickAI onOpen={() => setView('quickai')} />
       <ShareSheet />
       <div className="toasts">{s.toasts.map((t) => <div key={t.id} className="toast">{t.text}{t.action && <button onClick={t.action.run}>{t.action.label}</button>}</div>)}</div>
     </div>

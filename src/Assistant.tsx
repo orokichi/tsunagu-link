@@ -1,25 +1,33 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import SiriOrb, { OrbState } from './SiriOrb'
 import { link } from './link'
-import { Icon } from './icons'
+import { Icon, GroqIcon } from './icons'
 import { GROQ_MODELS, DEFAULT_MODEL, getConfig, hasKey, runTurn, saveConfig, testGroq, TOOL_LABEL as LABEL } from './assistant'
 import type { ChatMsg } from './assistant'
 import { primeAudio, setSound, sfxError, sfxOpen, sfxSend, sfxSuccess, sfxTick, soundOn } from './sfx'
 
 type Line = { id: number; who: 'user' | 'ai' | 'tool'; text: string; ok?: boolean; pending?: boolean }
 
-const CHIPS = ['バッテリーは？', '通知をまとめて消して', '音量を下げて', '未読メッセージを見せて', 'スマホの場所は？', 'スマホを鳴らして']
+const CHIPS = ['バッテリーは？', '通知をまとめて消して', '音量を下げて', '未読メッセージを見せて', 'スマホの場所は？', '通知のウィジェットを作って']
+
+const shortModel = (id: string) => (GROQ_MODELS.find(([m]) => m === id) || [id, id])[1].split(' — ')[0]
 
 /**
- * AI assistant that manages the paired phone: a Siri-style orb in the bottom
- * right corner (in both the standard and the Googlebook OS UI) that opens a
- * compact glass panel. The thinking is Groq Chat Completions with tool calling
- * (see src/assistant.ts); every action goes through the same `link` client the
- * UI uses, so it can do exactly what the app can do — nothing more.
+ * クイックAI — a Gemini-shaped standalone app for the paired phone.
+ *
+ * The design follows Gemini: a clean surface, a greeting and prompt chips when
+ * the conversation is empty, the model named in a pill at the top (tap it to
+ * change model — the next message uses it immediately), a user message as a
+ * filled pill on the right and the answer on the left under the Groq「g」mark,
+ * and one centred pill input bar at the bottom with voice, send and the sound
+ * toggle. The thinking is Groq Chat Completions with tool calling (see
+ * assistant.ts); every action goes through the same `link` client the UI uses.
+ *
+ * It is never a modal: inside the Googlebook OS desktop it opens as a window
+ * (`QuickAIChat`), so the widgets behind it stay visible.
  */
-export default function Assistant({ onOpenSettings }: { onOpenSettings: () => void }) {
+export function QuickAIChat({ onOpenSettings, onClose }: { onOpenSettings?: () => void; onClose?: () => void }) {
   const ls_ = useSyncExternalStore(link.subscribe, link.get)
-  const [open, setOpen] = useState(false)
   const [orb, setOrb] = useState<OrbState>('idle')
   const [lines, setLines] = useState<Line[]>([])
   const [input, setInput] = useState('')
@@ -27,16 +35,18 @@ export default function Assistant({ onOpenSettings }: { onOpenSettings: () => vo
   const [listening, setListening] = useState(false)
   const [amp, setAmp] = useState(0)
   const [err, setErr] = useState<string | null>(null)
-  const [model] = useState(() => getConfig().model)
+  const [model, setModel] = useState(() => getConfig().model || DEFAULT_MODEL)
+  const [models, setModels] = useState(false)
   const [snd, setSnd] = useState(() => soundOn())
   const history = useRef<ChatMsg[]>([])
   const idRef = useRef(0)
   const recRef = useRef<any>(null)
   const logRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
   const push = (l: Omit<Line, 'id'>) => setLines((ls) => [...ls, { ...l, id: ++idRef.current }])
 
-  useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight }, [lines, open])
+  useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight }, [lines])
   useEffect(() => () => { try { recRef.current?.stop() } catch {} }, [])
 
   // Simulated speech envelope while the microphone is open (keeps the orb
@@ -51,18 +61,11 @@ export default function Assistant({ onOpenSettings }: { onOpenSettings: () => vo
     return () => window.clearInterval(id)
   }, [listening])
 
-  const toggle = () => {
-    primeAudio()
-    if (!open) sfxOpen()
-    setOpen((v) => !v)
-    if (open) { try { recRef.current?.stop() } catch {} }
-  }
-
   const send = async (forced?: string) => {
     const q = (forced ?? input).trim()
     if (!q || busy) return
-    if (!hasKey()) { setErr('Groq の API キーがまだ設定されていません。設定 →「AIアシスタント」でキーを入力してください。'); return }
-    sfxSend()
+    if (!hasKey()) { setErr('Groq の API キーがまだ設定されていません。設定 →「クイックAI」でキーを入力してください。'); return }
+    primeAudio(); sfxSend()
     setInput('')
     setErr(null)
     push({ who: 'user', text: q })
@@ -95,7 +98,7 @@ export default function Assistant({ onOpenSettings }: { onOpenSettings: () => vo
     } catch (e: any) {
       const msg = String(e?.message || '')
       const text = msg === 'NO_KEY'
-        ? 'Groq の API キーがまだ設定されていません。設定 →「AIアシスタント」でキーを入力してください。'
+        ? 'Groq の API キーがまだ設定されていません。設定 →「クイックAI」でキーを入力してください。'
         : msg === 'AbortError' ? 'キャンセルしました。'
           : /Failed to fetch|NetworkError/i.test(msg) ? 'Groq に接続できませんでした（ネットワーク、またはブラウザの拡張機能によるブロックを確認してください）。'
             : msg
@@ -130,81 +133,135 @@ export default function Assistant({ onOpenSettings }: { onOpenSettings: () => vo
     } catch { setErr('マイクを開始できませんでした。') }
   }
 
+  const pickModel = (id: string) => {
+    saveConfig({ model: id })
+    setModel(id)
+    setModels(false)
+    sfxTick()
+    inputRef.current?.focus()
+  }
   const toggleSound = () => { const v = !snd; setSnd(v); setSound(v); primeAudio(); if (v) sfxTick() }
 
   const ready = typeof window !== 'undefined' && hasKey()
 
   return (
-    <>
-      <button className={'ai-fab' + (open ? ' open' : '')} onClick={toggle} aria-label={open ? 'AI アシスタントを閉じる' : 'AI アシスタントを開く'} title="AI アシスタント">
-        <SiriOrb state={orb} size={52} amplitude={amp} />
-      </button>
-
-      {open && (
-        <section className="ai-panel" role="dialog" aria-label="Quick Link AI アシスタント">
-          <header className="ai-head">
-            <SiriOrb state={orb} size={38} amplitude={amp} />
-            <div className="ai-title">
-              <b>アシスタント</b>
-              <span className="small muted">{(GROQ_MODELS.find(([id]) => id === model) || [model, model])[1].split(' — ')[0]}</span>
-            </div>
-            <button className={'icon-btn sm' + (snd ? ' on' : '')} title={snd ? '効果音をオフ' : '効果音をオン'} aria-pressed={snd} onClick={toggleSound}>
-              <Icon n={snd ? 'volume_up' : 'volume_off'} fill={snd} />
-            </button>
-            <button className="icon-btn sm" title="閉じる" onClick={toggle}><Icon n="close" /></button>
-          </header>
-
-          {!ready ? (
-            <div className="ai-setup">
-              <Icon n="key" />
-              <b>Groq Console API キーが必要です</b>
-              <p className="small muted">設定 →「AIアシスタント（Groq Console API）」でキーを保存すると、スマホの操作を頼めるようになります。キーはこのブラウザにだけ保存され、Groq 以外には送られません。</p>
-              <button className="btn filled" onClick={() => { setOpen(false); onOpenSettings() }}><Icon n="settings" />設定を開く</button>
-            </div>
-          ) : (
+    <div className="qai">
+      <header className="qai-head">
+        <span className="qai-mark"><GroqIcon size={20} /></span>
+        <b className="qai-name">クイックAI</b>
+        <div className="qai-model">
+          <button className={'qai-pill' + (models ? ' open' : '')} aria-haspopup="listbox" aria-expanded={models}
+            title="モデルを選ぶ" onClick={() => setModels((v) => !v)}>
+            <span>{shortModel(model)}</span><Icon n="expand_more" />
+          </button>
+          {models && (
             <>
-              <div className="ai-log" ref={logRef}>
-                {!lines.length && (
-                  <div className="ai-intro">
-                    <b>スマホのことを、話しかけて。</b>
-                    <p className="small muted">通知・音量・メッセージ・現在地・Quick Share まで、つないだスマートフォンをそのまま操作します。</p>
-                  </div>
-                )}
-                {lines.map((l) =>
-                  l.who === 'tool' ? (
-                    <div key={l.id} className={'ai-tool' + (l.pending ? ' pending' : l.ok ? ' ok' : ' fail')}>
-                      <Icon n={l.pending ? 'progress_activity' : l.ok ? 'check_circle' : 'error'} className={l.pending ? 'spin' : ''} />
-                      <span className="small">{l.text}</span>
-                    </div>
-                  ) : (
-                    <div key={l.id} className={'ai-msg ' + l.who}>{l.text}</div>
-                  ),
-                )}
-                {busy && !lines.some((l) => l.pending) && <div className="ai-msg ai thinking"><span className="dots"><i /><i /><i /></span></div>}
+              <div className="qai-menu-scrim" onClick={() => setModels(false)} />
+              <div className="qai-menu" role="listbox" aria-label="モデル">
+                {GROQ_MODELS.map(([id, label]) => (
+                  <button key={id} role="option" aria-selected={id === model} className={id === model ? 'on' : ''} onClick={() => pickModel(id)}>
+                    <span><b>{label.split(' — ')[0]}</b><span className="small muted">{label.split(' — ')[1] || id}</span></span>
+                    {id === model && <Icon n="check" />}
+                  </button>
+                ))}
+                <p className="qai-menu-note small muted">選んだモデルは次のメッセージから使われます。設定にも保存されます。</p>
               </div>
-
-              {err && <div className="ai-err small"><Icon n="error" />{err}</div>}
-
-              <div className="ai-chips">
-                {CHIPS.map((c) => <button key={c} className="ai-chip" disabled={busy} onClick={() => void send(c)}>{c}</button>)}
-              </div>
-
-              <form className="ai-input" onSubmit={(e) => { e.preventDefault(); void send() }}>
-                <button type="button" className={'icon-btn' + (listening ? ' filled' : '')} title="音声で入力" aria-pressed={listening} onClick={mic}>
-                  <Icon n={listening ? 'mic' : 'mic_none'} fill={listening} />
-                </button>
-                <input value={input} onChange={(e) => setInput(e.target.value)} placeholder={listening ? '聞いています…' : '例: 通知を全部消して'} aria-label="アシスタントへの指示" />
-                <button className="icon-btn filled" disabled={busy || !input.trim()} aria-label="送信"><Icon n="send" fill /></button>
-              </form>
-              <p className="ai-note small muted">
-                {ls_.status === 'connected' ? `${ls_.device?.name || 'スマートフォン'} に接続中` : 'スマートフォン未接続（接続するまで操作はできません）'}
-                <span> · Groq / {model}</span>
-              </p>
             </>
           )}
-        </section>
+        </div>
+        <span className="qai-spacer" />
+        <button className={'icon-btn sm' + (snd ? ' on' : '')} title={snd ? '効果音をオフ' : '効果音をオン'} aria-pressed={snd} onClick={toggleSound}>
+          <Icon n={snd ? 'volume_up' : 'volume_off'} fill={snd} />
+        </button>
+        {onClose && <button className="icon-btn sm" title="閉じる" onClick={onClose}><Icon n="close" /></button>}
+      </header>
+
+      {!ready ? (
+        <div className="ai-setup qai-setup">
+          <GroqIcon size={40} />
+          <b>Groq Console API キーが必要です</b>
+          <p className="small muted">設定 →「クイックAI（Groq Console API）」でキーを保存すると、スマホの操作やウィジェット作成を頼めるようになります。キーはこのブラウザにだけ保存され、Groq 以外には送られません。</p>
+          {onOpenSettings && <button className="btn filled" onClick={onOpenSettings}><Icon n="settings" />設定を開く</button>}
+        </div>
+      ) : (
+        <>
+          <div className="qai-log" ref={logRef}>
+            {!lines.length && (
+              <div className="qai-hello">
+                <span className="qai-orb"><SiriOrb state={orb} size={56} amplitude={amp} /></span>
+                <h2>こんにちは、クイックAIです</h2>
+                <p className="muted">つないだスマートフォンのことを聞いたり、操作したり、ウィジェットを作ったりできます。</p>
+              </div>
+            )}
+            {lines.map((l) =>
+              l.who === 'tool' ? (
+                <div key={l.id} className={'ai-tool' + (l.pending ? ' pending' : l.ok ? ' ok' : ' fail')}>
+                  <Icon n={l.pending ? 'progress_activity' : l.ok ? 'check_circle' : 'error'} className={l.pending ? 'spin' : ''} />
+                  <span className="small">{l.text}</span>
+                </div>
+              ) : l.who === 'user' ? (
+                <div key={l.id} className="qai-turn user"><div className="qai-bubble user">{l.text}</div></div>
+              ) : (
+                <div key={l.id} className="qai-turn ai">
+                  <span className="qai-avatar"><GroqIcon size={16} /></span>
+                  <div className="qai-bubble ai">{l.text}</div>
+                </div>
+              ),
+            )}
+            {busy && !lines.some((l) => l.pending) && (
+              <div className="qai-turn ai"><span className="qai-avatar"><GroqIcon size={16} /></span>
+                <div className="qai-bubble ai thinking"><span className="dots"><i /><i /><i /></span></div></div>
+            )}
+          </div>
+
+          {err && <div className="ai-err small"><Icon n="error" />{err}</div>}
+
+          {!lines.length && (
+            <div className="qai-chips">
+              {CHIPS.map((c) => <button key={c} className="qai-chip" disabled={busy} onClick={() => void send(c)}><Icon n="auto_awesome" />{c}</button>)}
+            </div>
+          )}
+
+          <form className="qai-input" onSubmit={(e) => { e.preventDefault(); void send() }}>
+            <button type="button" className={'icon-btn' + (listening ? ' filled' : '')} title="音声で入力" aria-pressed={listening} onClick={mic}>
+              <Icon n={listening ? 'mic' : 'mic_none'} fill={listening} />
+            </button>
+            <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)}
+              placeholder={listening ? '聞いています…' : 'クイックAIにメッセージ'} aria-label="クイックAIへの指示" />
+            <button className="icon-btn filled qai-send" disabled={busy || !input.trim()} aria-label="送信"><Icon n="arrow_upward" fill /></button>
+          </form>
+          <p className="qai-note small muted">
+            {ls_.status === 'connected' ? `${ls_.device?.name || 'スマートフォン'} に接続中` : 'スマートフォン未接続（接続するまで操作はできません）'}
+            <span> · Groq / {shortModel(model)}</span>
+            <span> · 誤りを含む場合があります</span>
+          </p>
+        </>
       )}
-    </>
+    </div>
+  )
+}
+
+/** The corner orb: a shortcut that opens the Quick AI app (never a modal). */
+export function QuickAIOrb({ onClick, open }: { onClick: () => void; open?: boolean }) {
+  return (
+    <button className={'ai-fab gb-ai-fab' + (open ? ' open' : '')} onClick={onClick}
+      aria-label="クイックAIを開く" title="クイックAI">
+      <SiriOrb state="idle" size={50} />
+    </button>
+  )
+}
+
+/**
+ * Classic (rail) UI: the corner orb opens クイックAI as the main pane — one
+ * instance, one conversation, and a real app rather than a popup that covers
+ * the page.
+ */
+export default function QuickAI({ onOpen }: { onOpen: () => void }) {
+  return (
+    <button className="ai-fab" onClick={() => { primeAudio(); sfxOpen(); onOpen() }}
+      aria-label="クイックAIを開く" title="クイックAI">
+      <SiriOrb state="idle" size={52} />
+    </button>
   )
 }
 
@@ -221,7 +278,7 @@ export function GroqSettings() {
   const save = () => {
     saveConfig({ key: key.trim(), model })
     setState('idle'); setMsg('保存しました')
-    link.toast('AIアシスタントの設定を保存しました')
+    link.toast('クイックAIの設定を保存しました')
   }
   const test = async () => {
     setState('busy'); setMsg('接続しています…')
@@ -233,7 +290,7 @@ export function GroqSettings() {
   return (
     <section className="card set-card a-ai">
       <div className="set-head">
-        <div><h3>AIアシスタント（Groq Console API）</h3><p className="muted small">画面右下のオーブに話しかけると、つないだスマートフォンを操作します</p></div>
+        <div><h3>クイックAI（Groq Console API）</h3><p className="muted small">アプリ「クイックAI」と、AI によるウィジェット作成で使います</p></div>
         <span className={'via-chip ' + (cfg.key ? 'lan' : '')}><Icon n={cfg.key ? 'check_circle' : 'key'} />{cfg.key ? '設定済み' : '未設定'}</span>
       </div>
       <div className="ai-set-row">

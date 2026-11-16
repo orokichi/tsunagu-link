@@ -42,6 +42,22 @@ export interface Photo { id: string; video: boolean; time: number; thumb: string
 export interface Transfer { id: string; name: string; size: number; mime: string; done: number; dir: 'in' | 'out'; state: 'active' | 'done' | 'error'; url?: string }
 export interface Clip { text: string; time: number; from: 'pc' | 'phone' }
 export interface Toast { id: number; text: string; action?: { label: string; run: () => void } }
+/** スマホ操作（リモート／ミラーリング）: what the phone reports about the two
+ *  Android permissions it needs, and how the live screen stream is doing. The
+ *  frames themselves do not go through React state (that would re-render the
+ *  whole desktop a dozen times a second); they reach the mirror canvas through
+ *  `link.onFrame`. */
+export type MirrorState = 'off' | 'requesting' | 'live' | 'denied' | 'error'
+export interface RemoteInfo {
+  /** ユーザー補助（リモート操作） is switched on in Android settings. */
+  acc: boolean
+  mirror: MirrorState
+  /** Phone screen size in pixels (what the touch coordinates are relative to). */
+  w: number; h: number
+  fps: number
+  reason?: string
+}
+export const REMOTE_OFF: RemoteInfo = { acc: false, mirror: 'off', w: 0, h: 0, fps: 0 }
 
 export type PushState = 'unsupported' | 'off' | 'on' | 'blocked' | 'busy' | 'error'
 export interface State {
@@ -90,6 +106,8 @@ export interface State {
   bookUi?: boolean
   /** Round-trip of the last heartbeat, for the connection badge. */
   latency?: number | null
+  /** スマホ操作（リモート／ミラーリング）の状態. */
+  remote: RemoteInfo
 }
 
 const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -100,7 +118,7 @@ const ls = {
   del: (k: string) => localStorage.removeItem('ts.' + k),
 }
 const CHUNK = 48 * 1024
-export const APP_VERSION = '1.4.0'
+export const APP_VERSION = '1.5.0'
 /** How often the two ends ping each other, and how long silence is tolerated
  *  before the link is treated as dead (a data channel can stay "open" long
  *  after the other side is gone: Wi-Fi roamed, laptop slept, phone lost data). */
@@ -451,7 +469,7 @@ class Link {
     const params = new URLSearchParams(location.search)
     const focusNotif = params.get('notif') || undefined
     const sharedId = params.get('shared') || undefined
-    this.state = { status: 'starting', code, secret, pushState: pushSupported() ? (ls.get('push') === '1' ? 'on' : 'off') : 'unsupported', pushSynced: false, notifs: [], threads: [], sms: {}, smsMore: {}, smsBusy: {}, smsError: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false, ringing: false, mode: ls.get('mode') === 'cloud' ? 'cloud' : 'auto', lanManual: parseLan(ls.get('lanManual')), lanBusy: false, usbSupported: usbSupported(), usbBusy: false, usbMessage: undefined, share: null, shareQueued: false, bookUi: ls.get('bookui') === '1', latency: null }
+    this.state = { status: 'starting', code, secret, pushState: pushSupported() ? (ls.get('push') === '1' ? 'on' : 'off') : 'unsupported', pushSynced: false, notifs: [], threads: [], sms: {}, smsMore: {}, smsBusy: {}, smsError: {}, calls: [], photos: [], photosMore: false, transfers: [], clips: JSON.parse(ls.get('clips') || '[]'), toasts: [], seed: ls.get('seed') || undefined, focusNotif, fsPath: '', fsItems: [], fsAccess: false, fsReady: false, locBusy: false, ringing: false, mode: ls.get('mode') === 'cloud' ? 'cloud' : 'auto', lanManual: parseLan(ls.get('lanManual')), lanBusy: false, usbSupported: usbSupported(), usbBusy: false, usbMessage: undefined, share: null, shareQueued: false, bookUi: ls.get('bookui') !== '0', latency: null, remote: REMOTE_OFF }
     void this.start()
     // If we already know the phone's LAN endpoints (learned during a previous
     // pairing), try the direct route right away; keep retrying while offline
@@ -1215,6 +1233,20 @@ class Link {
     const s = this.state
     switch (m.t) {
       case 'pong': break
+      // ---- スマホ操作（リモート／ミラーリング） ----
+      case 'remote_state': this.set({ remote: {
+        acc: !!m.acc,
+        mirror: (['off', 'requesting', 'live', 'denied', 'error'] as const).includes(m.mirror) ? m.mirror : 'off',
+        w: Number(m.w) || 0, h: Number(m.h) || 0, fps: Number(m.fps) || 0, reason: m.reason || undefined,
+      } }); break
+      case 'mirror_state': {
+        const st = (['off', 'requesting', 'live', 'denied', 'error'] as const).includes(m.state) ? m.state : 'off'
+        this.set({ remote: { ...s.remote, mirror: st, w: Number(m.w) || s.remote.w, h: Number(m.h) || s.remote.h, fps: Number(m.fps) || 0, reason: m.reason || undefined } })
+        if (st === 'denied') this.toast('スマホで画面共有が許可されませんでした')
+        break
+      }
+      case 'mirror_frame': this.onMirrorFrame(String(m.d || ''), Number(m.w) || 0, Number(m.h) || 0); break
+      case 'acc_state': this.set({ remote: { ...s.remote, acc: !!m.on } }); break
       case 'info': this.set({ info: m.info, ...(m.info?.sys ? { sys: m.info.sys } : {}) }); this.learnLan(m.info?.lan); break
       case 'sys': this.set({ sys: m.sys }); break
       case 'sys_err': this.toast(m.text || '操作できませんでした'); if (m.sys) this.set({ sys: m.sys }); break
@@ -1522,7 +1554,7 @@ class Link {
   /** Ask the phone for fresh data and resolve once the matching state changed
    *  (or after `ms`). The AI assistant reads through this so its answers
    *  describe the phone as it is right now, not as it was at connect time. */
-  async requestState(what: 'info' | 'notifs' | 'threads' | 'sys' | 'calls' | 'photos' | 'location', ms = 5000): Promise<boolean> {
+  async requestState(what: 'info' | 'notifs' | 'threads' | 'sys' | 'calls' | 'photos' | 'location' | 'remote', ms = 5000): Promise<boolean> {
     if (!this.conn?.open) return false
     const key = what as keyof State
     const before = JSON.stringify(this.state[key] ?? null)
@@ -1535,11 +1567,48 @@ class Link {
     return false
   }
 
-  // ---------------- Experimental 「Googlebook OS」 desktop UI ----------------
+  // ---------------- Googlebook OS desktop UI ----------------
+  /** The Googlebook OS desktop is the standard screen; the classic rail UI is
+   *  the opt-out (設定 → 画面). `bookui` is stored only once the user chooses, so
+   *  a first launch lands on the desktop. */
   setBookUi(on: boolean) {
     ls.set('bookui', on ? '1' : '0')
     this.set({ bookUi: on })
-    this.toast(on ? 'Googlebook OS デスクトップUIに切り替えました' : '標準の画面に戻しました')
+    this.toast(on ? 'Googlebook OS デスクトップに切り替えました' : 'クラシック表示に切り替えました')
+  }
+
+  // ---------------- スマホ操作（リモート／ミラーリング） ----------------
+  /** Latest decoded frame from the phone's MediaProjection stream. Held outside
+   *  React state on purpose: the mirror canvas paints it directly. */
+  private frameCb?: (url: string, w: number, h: number) => void
+  onFrame(cb: ((url: string, w: number, h: number) => void) | null) {
+    this.frameCb = cb || undefined
+    return () => { if (this.frameCb === cb) this.frameCb = undefined }
+  }
+  private lastFrameAt = 0
+
+  /** Ask the phone to report ユーザー補助 / ミラーリング state. */
+  remoteRefresh() { if (this.conn?.open) this.send({ t: 'get', what: 'remote' }) }
+  /** 「画面共有を開始」: the phone raises the MediaProjection dialog. */
+  mirrorStart() {
+    if (!this.conn?.open) { this.toast('スマートフォンが接続されていません'); return }
+    this.send({ t: 'mirror_start' })
+    this.set({ remote: { ...this.state.remote, mirror: 'requesting', reason: undefined } })
+  }
+  mirrorStop() {
+    if (this.conn?.open) this.send({ t: 'mirror_stop' })
+    this.set({ remote: { ...this.state.remote, mirror: 'off' } })
+  }
+  /** One keyboard action from the PC (enter / backspace / tab / arrows / …). */
+  remoteKey(key: string) { if (this.conn?.open) this.send({ t: 'rm_key', key }) }
+  /** Natural-language free text for the focused field on the phone. */
+  remoteText(text: string) { if (this.conn?.open && text) this.send({ t: 'rm_text', text }) }
+
+  private onMirrorFrame(d: string, w: number, h: number) {
+    const now = Date.now()
+    if (now - this.lastFrameAt < 40) return
+    this.lastFrameAt = now
+    this.frameCb?.(d.startsWith('data:') ? d : 'data:image/jpeg;base64,' + d, w, h)
   }
 
   // ---------------- Web Share Target (shared from this computer) ----------------
