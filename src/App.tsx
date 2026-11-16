@@ -639,7 +639,7 @@ function Settings() {
         <div className="set-head">
           <div><h3>ローカル接続</h3><p className="muted small">同じ Wi-Fi の中だけで、インターネットを経由せずに直接つなぎます</p></div>
         </div>
-        <div className="set-row">
+        <div className="set-row lan-row">
           <Stat icon={target?.manual ? 'push_pin' : 'wifi_find'} label={target?.manual ? '手動で指定した接続先' : '自動で見つけた接続先'}
             value={target ? `${target.eps.ips[0]}:${target.eps.port}` : '未検出'} />
           <button className="btn tonal" disabled={s.lanBusy} onClick={() => link.connectLocal()}>
@@ -650,7 +650,7 @@ function Settings() {
         <form className="lan-form" onSubmit={(e) => { e.preventDefault(); link.setManualLan(ip, Number(port)) }}>
           <label>スマホの IP アドレス<input inputMode="decimal" placeholder="192.168.1.23" value={ip} onChange={(e) => setIp(e.target.value)} /></label>
           <label>ポート<input inputMode="numeric" placeholder="47822" value={port} onChange={(e) => setPort(e.target.value)} /></label>
-          <button className="btn filled"><Icon n="save" />この接続先を使う</button>
+          <button className="btn filled" disabled={!ip.trim()}><Icon n="save" />この接続先を使う</button>
         </form>
         <p className="muted small">{s.lanMessage || (target?.manual
           ? '手動で指定した接続先を優先して試します。うまくつながらないときは、スマホが同じ Wi-Fi にいるか、IP アドレスが変わっていないかを確認してください。'
