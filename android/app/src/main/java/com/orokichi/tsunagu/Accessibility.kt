@@ -196,7 +196,8 @@ class QuickLinkAccessibilityService : AccessibilityService() {
     /** Enter: the focused field's own IME action (send / search / done). */
     fun enter() = main.post {
         val node = focusedInput() ?: return@post
-        node.performAction(AccessibilityNodeInfo.ACTION_IME_ENTER)
+        // ACTION_IME_ENTER is an AccessibilityAction (API 30+), not an int constant.
+        node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
     }
 
     /* ---------------- keys ---------------- */
